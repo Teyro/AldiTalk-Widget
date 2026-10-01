@@ -3,138 +3,156 @@
 // icon-color: blue; icon-glyph: signal;
 
 // ============================================================
-//  ALDI TALK Datenvolumen-Widget für Scriptable (iOS)
-//  Empfohlene Widget-Größe: MEDIUM (nur dort ist der Button tappbar)
+//  ALDI TALK Widget 2.0 für Scriptable (iOS)
 //
-//  Vor dem ersten Widget-Einsatz:
+//  Größen: klein, mittel, groß – und Sperrbildschirm (rund, rechteckig, Textzeile).
+//  Zeigt Datenvolumen (alle Pakete zusammen), Guthaben, Laufzeit, Tagesbudget,
+//  Verbrauch der letzten 14 Tage und eine Prognose, ob das Volumen reicht.
+//  Warnt per Mitteilung, wenn das Volumen knapp oder das Guthaben vor der
+//  Verlängerung zu niedrig ist.
+//
+//  Einrichten:
 //  1. Skript in Scriptable anlegen und GENAU so benennen wie SCRIPT_NAME.
-//  2. Skript einmal IN DER APP starten -> Login-Daten eingeben.
+//  2. Skript einmal IN DER APP starten -> Zugangsdaten eingeben.
+//  3. Widget auf den Home- oder Sperrbildschirm legen, Skript "AldiTalk" wählen.
 //
-//  Lehnt ALDI TALK die Zugangsdaten ab (z. B. Passwort geändert),
-//  probiert das Widget NICHT weiter (sonst sperrt ALDI TALK das Konto),
-//  sondern bittet darum, das Skript einmal in der App zu öffnen –
-//  dort können die Zugangsdaten neu eingegeben werden.
+//  Widget-Parameter (optional, beim Bearbeiten des Widgets):
+//    "2"       -> zweiter Vertrag des Kontos (bei mehreren Rufnummern)
+//    "hell"    -> Design für dieses Widget (aldi, dunkel, hell, auto)
+//    "2, hell" -> beides
+//
+//  Lehnt ALDI TALK die Zugangsdaten ab, probiert das Widget NICHT weiter
+//  (sonst sperrt ALDI TALK das Konto) – einmal das Skript in der App öffnen.
 // ============================================================
 
-const SCRIPT_NAME = "AldiTalk";        // muss dem Skriptnamen entsprechen!
-const CACHE_MAX_AGE_MIN = 30;           // so oft wird wirklich neu eingeloggt
-const WARN_BELOW_GB = 1.0;              // ab hier färbt sich der Ring rot
+const SCRIPT_NAME = "AldiTalk";
+const VERSION = "2.0";
 
 // --- Endpunkte (Stand: Kundenportal 2026) ---------------------
 const PORTAL = "https://www.alditalk-kundenportal.de";
 const AUTH = "https://login.alditalk-kundenbetreuung.de";
-const AUTH_API = AUTH + "/signin/json/authenticate";
+const AUTH_API = AUTH + "/signin/json/authenticate?realm=%2Falditalk&authIndexType=service&authIndexValue=Login";
 const OVERVIEW = PORTAL + "/portal/auth/uebersicht/";
 const BOOKING = PORTAL + "/portal/auth/buchungsuebersicht/";
-const BFF207 = "/scs/bff/scs-207-customer-master-data-bff/customer-master-data";
-const BFF209 = "/scs/bff/scs-209-selfcare-dashboard-bff/selfcare-dashboard";
+const BFF207 = PORTAL + "/scs/bff/scs-207-customer-master-data-bff/customer-master-data";
+const BFF209 = PORTAL + "/scs/bff/scs-209-selfcare-dashboard-bff/selfcare-dashboard";
 
 const UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-const UNIT_TO_GB = { bytes: 1024 ** 3, kilobytes: 1024 ** 2, megabytes: 1024, gigabytes: 1 };
+const UNIT_TO_GB = {
+  bytes: 1024 ** 3, byte: 1024 ** 3, b: 1024 ** 3,
+  kilobytes: 1024 ** 2, kilobyte: 1024 ** 2, kb: 1024 ** 2,
+  megabytes: 1024, megabyte: 1024, mb: 1024,
+  gigabytes: 1, gigabyte: 1, gb: 1,
+};
+const ZEIT_LIMIT_S = 20;              // einzelne Anfrage – Widgets haben insgesamt nur ~30 s
+const VERLAUF_TAGE = 60;
 
 const K_USER = "alditalk_user";
 const K_PASS = "alditalk_pass";
-const LOGIN_SPERRE = "alditalk-loginfehler.json"; // Merker: Zugangsdaten wurden abgelehnt
 
-// --- Farben ---------------------------------------------------
-const C = {
-  bgTop: new Color("#0c1c3a"),
-  bgBottom: new Color("#12325f"),
-  cyan: new Color("#00a0e2"),
-  orange: new Color("#f59c00"),
-  red: new Color("#ff4d4f"),
-  track: new Color("#ffffff", 0.14),
-  text: new Color("#ffffff"),
-  dim: new Color("#ffffff", 0.6),
+// ============================================================
+//  Einstellungen (in der App unter "Einstellungen" änderbar)
+// ============================================================
+const STANDARD = {
+  design: "aldi",            // aldi | dunkel | hell | auto
+  warnGB: 1.0,               // Volumen-Warnung (Ring rot + Mitteilung)
+  warnGuthaben: 5.0,         // Guthaben-Warnung kurz vor der Verlängerung (€)
+  mitteilungen: true,
+  cacheMin: 30,              // so oft wird wirklich neu eingeloggt
+  vertrag: 0,                // welcher Vertrag (bei mehreren Rufnummern)
 };
 
-// ============================================================
-//  Einstieg
-// ============================================================
-const param = (args.queryParameters && args.queryParameters.param) || "";
+const fm = FileManager.local();
+const ORDNER = fm.documentsDirectory();
+const pfad = (name) => fm.joinPath(ORDNER, name);
 
-if (param === "book") {
-  // Nachbuchen: Buchungsübersicht im Safari-Sheet öffnen (teilt die
-  // Session mit Safari, dort bist du i.d.R. schon eingeloggt).
-  Safari.openInApp(BOOKING, false);
-  Script.complete();
-} else if (param === "menu") {
-  // Kleines Widget hat nur EIN Tap-Ziel -> kurzes Menü
-  const m = new Alert();
-  m.title = "ALDI TALK";
-  m.addAction("＋ 1 GB nachbuchen");
-  m.addAction("Nur aktualisieren");
-  m.addAction("Zugangsdaten ändern");
-  m.addCancelAction("Abbrechen");
-  const choice = await m.presentSheet();
-  if (choice === 0) Safari.openInApp(BOOKING, false);
-  else if (choice === 1 || choice === 2) {
-    if (choice === 2) vergissZugangsdaten();
-    forceRefresh();
-    const creds = await getCredentials();
-    const data = await getData(creds);
-    await buildWidget(data, "small").presentSmall();
-  }
-  Script.complete();
-} else {
-  const family = config.widgetFamily || "small";
-  // In der App geöffnet, nachdem ALDI TALK die Zugangsdaten abgelehnt hat:
-  // gleich neu fragen.
-  if (!config.runsInWidget && loginSperreAktiv()) {
-    const a = new Alert();
-    a.title = "ALDI TALK";
-    a.message = "ALDI TALK hat die gespeicherten Zugangsdaten abgelehnt:\n\n" + loginSperreText() +
-      "\n\nHast du dein Passwort geändert? Dann bitte neu eingeben.";
-    a.addAction("Zugangsdaten neu eingeben");
-    a.addAction("Nochmal mit den alten versuchen");
-    a.addCancelAction("Abbrechen");
-    const wahl = await a.presentAlert();
-    if (wahl === 0) vergissZugangsdaten();
-    if (wahl !== -1) { hebeLoginSperreAuf(); forceRefresh(); }
-  }
-  const creds = await getCredentials();
-  const data = await getData(creds);
-  const widget = buildWidget(data, family);
-  widget.url =
-    "scriptable:///run?scriptName=" + encodeURIComponent(SCRIPT_NAME) +
-    (family === "small" ? "&param=menu" : "");
-  widget.refreshAfterDate = new Date(Date.now() + 15 * 60 * 1000);
-
-  if (config.runsInWidget) {
-    Script.setWidget(widget);
-  } else if (family === "medium") {
-    await widget.presentMedium();
-  } else {
-    await widget.presentSmall();
-  }
-  Script.complete();
+function liesJSON(name, ersatz) {
+  try {
+    const p = pfad(name);
+    if (fm.fileExists(p)) return JSON.parse(fm.readString(p));
+  } catch (e) { /* kaputte Datei – Ersatz nehmen */ }
+  return ersatz;
 }
+function schreibJSON(name, wert) { fm.writeString(pfad(name), JSON.stringify(wert)); }
+function loesche(name) { const p = pfad(name); if (fm.fileExists(p)) fm.remove(p); }
 
-function forceRefresh() {
-  const fm = FileManager.local();
-  const p = fm.joinPath(fm.documentsDirectory(), "alditalk-cache.json");
-  if (fm.fileExists(p)) fm.remove(p);
+const einstellungen = Object.assign({}, STANDARD, liesJSON("alditalk-einstellungen.json", {}));
+function speichereEinstellungen() { schreibJSON("alditalk-einstellungen.json", einstellungen); }
+
+// Widget-Parameter: "2" (Vertrag), "hell" (Design) oder "2, hell".
+const widgetParam = String(args.widgetParameter || "").toLowerCase().split(/[,; ]+/).filter(Boolean);
+let vertragIndex = einstellungen.vertrag;
+let designWahl = einstellungen.design;
+for (const teil of widgetParam) {
+  if (/^\d+$/.test(teil)) vertragIndex = Math.max(0, parseInt(teil, 10) - 1);
+  else if (["aldi", "dunkel", "hell", "auto"].includes(teil)) designWahl = teil;
 }
 
 // ============================================================
-//  Zugangsdaten (Keychain)
+//  Design
 // ============================================================
-async function getCredentials() {
+// Farben geprüft (Kontrast ≥ 3:1 zur Fläche, Farbsehschwäche): Balken-/Ringfarbe
+// #2a9ee0 auf Navy, #2a78d6 auf Weiß. Statusfarben (Warnung/kritisch) stehen nie
+// allein, sondern immer mit Symbol und Text ("⚠︎ wird knapp").
+const DESIGNS = {
+  aldi: {
+    dunkel: true,
+    oben: "#0b1a36", unten: "#15396b", glanz: "#2a9ee0",
+    text: "#ffffff", text2: "#ffffffa6", text3: "#ffffff70",
+    karte: "#ffffff14", spur: "#ffffff24", akzent: "#2a9ee0", akzentHell: "#7fd0ff",
+    knopf: "#f59c00", knopfText: "#1a1a1a", grau: "#ffffff52",
+  },
+  dunkel: {
+    dunkel: true,
+    oben: "#121316", unten: "#1f2228", glanz: "#3987e5",
+    text: "#ffffff", text2: "#c3c2b7", text3: "#898781",
+    karte: "#ffffff10", spur: "#ffffff1f", akzent: "#3987e5", akzentHell: "#86b6ef",
+    knopf: "#f59c00", knopfText: "#1a1a1a", grau: "#ffffff45",
+  },
+  hell: {
+    dunkel: false,
+    oben: "#ffffff", unten: "#e9f0fa", glanz: "#2a78d6",
+    text: "#0b1b33", text2: "#52514e", text3: "#898781",
+    karte: "#0c1c3a0d", spur: "#0c1c3a1a", akzent: "#2a78d6", akzentHell: "#6da7ec",
+    knopf: "#f59c00", knopfText: "#1a1a1a", grau: "#0c1c3a33",
+  },
+};
+const STATUS = { warnung: "#fab219", kritisch: "#d03b3b", kritischDunkel: "#ff6b6b", gut: "#0ca30c" };
+
+function design() {
+  let name = designWahl;
+  if (name === "auto") {
+    let dunkel = true;
+    try { dunkel = Device.isUsingDarkAppearance(); } catch (e) { /* Standard: dunkel */ }
+    name = dunkel ? "aldi" : "hell";
+  }
+  return DESIGNS[name] || DESIGNS.aldi;
+}
+
+/** Farbe aus "#rrggbb" oder "#rrggbbaa". */
+function farbe(hex) {
+  const h = hex.replace("#", "");
+  if (h.length === 8) return new Color("#" + h.slice(0, 6), parseInt(h.slice(6), 16) / 255);
+  return new Color("#" + h);
+}
+
+// ============================================================
+//  Zugangsdaten (Keychain) und Login-Sperre
+// ============================================================
+async function getCredentials({ fragen = !(config.runsInWidget || config.runsInAccessoryWidget) } = {}) {
   if (Keychain.contains(K_USER) && Keychain.contains(K_PASS)) {
     return { user: Keychain.get(K_USER), pass: Keychain.get(K_PASS) };
   }
-  if (config.runsInWidget) return null;
+  if (!fragen) return null;
 
   const a = new Alert();
   a.title = "ALDI TALK Login";
-  a.message = "Zugangsdaten des Kundenportals. Sie werden nur im iOS-Schlüsselbund gespeichert.";
+  a.message = "Zugangsdaten des Kundenportals (Rufnummer bzw. Benutzername und Passwort). Sie werden nur im iOS-Schlüsselbund gespeichert.";
   a.addTextField("Rufnummer / Benutzername");
   a.addSecureTextField("Passwort");
   a.addAction("Speichern");
   a.addCancelAction("Abbrechen");
-  const idx = await a.presentAlert();
-  if (idx === -1) return null;
-
+  if ((await a.presentAlert()) === -1) return null;
   const user = a.textFieldValue(0).trim();
   const pass = a.textFieldValue(1);
   if (!user || !pass) return null;
@@ -149,165 +167,192 @@ function vergissZugangsdaten() {
   if (Keychain.contains(K_PASS)) Keychain.remove(K_PASS);
 }
 
-// --- Merker "Zugangsdaten abgelehnt" --------------------------
-function sperrPfad() {
-  const fm = FileManager.local();
-  return fm.joinPath(fm.documentsDirectory(), LOGIN_SPERRE);
-}
-function loginSperreAktiv() {
-  return FileManager.local().fileExists(sperrPfad());
-}
-function loginSperreText() {
-  try { return JSON.parse(FileManager.local().readString(sperrPfad())).text || ""; } catch (e) { return ""; }
-}
-function setzeLoginSperre(text) {
-  FileManager.local().writeString(sperrPfad(), JSON.stringify({ text, ts: Date.now() }));
-}
-function hebeLoginSperreAuf() {
-  const fm = FileManager.local();
-  if (fm.fileExists(sperrPfad())) fm.remove(sperrPfad());
-}
+const SPERRE = "alditalk-loginfehler.json";
+const loginSperreAktiv = () => fm.fileExists(pfad(SPERRE));
+const loginSperreText = () => liesJSON(SPERRE, {}).text || "";
+const setzeLoginSperre = (text) => schreibJSON(SPERRE, { text, ts: Date.now() });
+const hebeLoginSperreAuf = () => loesche(SPERRE);
 
 // ============================================================
-//  Daten holen (mit Cache)
+//  Daten holen (mit Cache je Vertrag)
 // ============================================================
-async function getData(creds) {
-  const fm = FileManager.local();
-  const path = fm.joinPath(fm.documentsDirectory(), "alditalk-cache.json");
+const cacheName = () => `alditalk-cache-${vertragIndex}.json`;
+const verlaufName = () => `alditalk-verlauf-${vertragIndex}.json`;
 
-  let cache = null;
-  if (fm.fileExists(path)) {
-    try { cache = JSON.parse(fm.readString(path)); } catch (e) { cache = null; }
+function forceRefresh() { loesche(cacheName()); }
+
+async function holeDaten({ erzwingen = false } = {}) {
+  const cache = liesJSON(cacheName(), null);
+  const frisch = cache && cache.ts && (Date.now() - cache.ts) < einstellungen.cacheMin * 60 * 1000;
+  if (frisch && !erzwingen) return ergaenze({ ...cache, stale: false });
+
+  // Zugangsdaten wurden abgelehnt: NICHT weiter probieren (Kontosperre!).
+  if (loginSperreAktiv() && (config.runsInWidget || config.runsInAccessoryWidget)) {
+    const hinweis = "Zugangsdaten abgelehnt – Skript in der App öffnen";
+    return cache ? ergaenze({ ...cache, stale: true, hinweis }) : { error: hinweis };
   }
 
-  const fresh = cache && (Date.now() - cache.ts) < CACHE_MAX_AGE_MIN * 60 * 1000;
-  if (fresh) return { ...cache, stale: false };
-
-  // Zugangsdaten wurden abgelehnt: nicht weiter probieren (Kontosperre!).
-  if (loginSperreAktiv()) {
-    const hinweis = "Zugangsdaten abgelehnt – Skript einmal in der App öffnen";
-    if (cache) return { ...cache, stale: true, hinweis };
-    return { error: hinweis };
-  }
-
+  const creds = await getCredentials();
   if (!creds) {
-    if (cache) return { ...cache, stale: true };
-    return { error: "Kein Login – Skript einmal in der App öffnen" };
+    const hinweis = "Kein Login – Skript einmal in der App öffnen";
+    return cache ? ergaenze({ ...cache, stale: true, hinweis }) : { error: hinweis };
   }
 
   try {
     const live = await fetchLive(creds);
     live.ts = Date.now();
-    fm.writeString(path, JSON.stringify(live));
-    return { ...live, stale: false };
+    schreibJSON(cacheName(), live);
+    hebeLoginSperreAuf();
+    merkeVerlauf(live);
+    return ergaenze({ ...live, stale: false });
   } catch (e) {
     console.error(e);
     if (e.zugangsdaten) setzeLoginSperre(e.message);
-    if (cache) return { ...cache, stale: true, hinweis: e.zugangsdaten ? "Zugangsdaten abgelehnt – Skript in der App öffnen" : "" };
-    return { error: String(e.message || e).slice(0, 110) };
+    const kurz = String(e.message || e).slice(0, 120);
+    const hinweis = e.zugangsdaten ? "Zugangsdaten abgelehnt – Skript in der App öffnen" : kurz;
+    return cache ? ergaenze({ ...cache, stale: true, hinweis }) : { error: kurz, zugangsdaten: !!e.zugangsdaten };
   }
 }
 
+/** Abgeleitete Werte: Status, Resttage, Tagesbudget, Verbrauch, Prognose. */
+function ergaenze(d) {
+  if (d.error) return d;
+  const tage = resttage(d.expires);
+  d.resttage = tage;
+  d.pct = d.unbegrenzt ? 1 : (d.total > 0 ? Math.max(0, Math.min(1, d.left / d.total)) : 0);
+  d.status = d.unbegrenzt ? "gut"
+    : (d.left <= 0 ? "leer" : d.left <= einstellungen.warnGB ? "kritisch" : d.pct < 0.33 ? "warnung" : "gut");
+  d.tagesbudget = (!d.unbegrenzt && tage !== null && tage > 0) ? Math.max(0, d.left) / tage : null;
+  const verlauf = liesJSON(verlaufName(), []);
+  d.tageVerbrauch = tagesVerbrauch(verlauf, 14);
+  d.prognose = d.unbegrenzt ? null : prognose(verlauf, d);
+  return d;
+}
+
 // ============================================================
-//  Portal-Login + Abfrage
+//  Portal: Login + Abfrage
 // ============================================================
 async function fetchLive(creds) {
-  // 1) Session anstoßen
-  await req(OVERVIEW).loadString();
+  // Meist ist die Sitzung vom letzten Mal noch gültig – dann ganz ohne neuen Login
+  // (schneller, und weniger Anmeldungen = weniger Risiko einer Kontosperre).
+  let nav = await versucheJSON(BFF207 + "/v1/navigation-list");
+  if (!nav || !nav.userDetails) {
+    await anmelden(creds);
+    nav = await versucheJSON(BFF207 + "/v1/navigation-list");
+    if (!nav || !nav.userDetails) throw new Error("Kundenportal antwortet nicht wie erwartet (evtl. Wartungsarbeiten)");
+  }
 
-  // 2–4) Anmelden. ALDI TALK schickt bei einem Fehler KEINE Fehlermeldung,
-  // sondern das Anmeldeformular erneut – mit einem Hinweistext darin (falsche
-  // Zugangsdaten/Sperre) oder ohne (Rechenaufgabe nicht akzeptiert, dann
-  // einfach noch einmal mit einer neuen Aufgabe).
-  const authUrl = AUTH_API + "?realm=%2Falditalk&authIndexType=service&authIndexValue=Login";
-  let step2 = null;
+  const details = nav.userDetails || {};
+  const subs = details.subscriptions || [];
+  if (!subs.length) throw new Error("Kein Vertrag gefunden");
+  const vertraege = subs.map((s, i) => ({
+    label: s.msisdn || s.phoneNumber || s.rufnummer || s.alias || ("Vertrag " + (i + 1)),
+    contractId: s.contractId,
+  }));
+  const index = Math.min(vertragIndex, subs.length - 1);
+  const contractId = subs[index].contractId;
+
+  const offers = await versucheJSON(BFF209 + "/v1/offers?contractId=" + encodeURIComponent(contractId) + "&productType=");
+  if (!offers) throw new Error("Tarifdaten nicht abrufbar");
+
+  const pakete = [];
+  const sonstige = [];
+  let tarif = "";
+  for (const offer of offers.subscribedOffers || []) {
+    if (!tarif && offer.offerName) tarif = offer.offerName;
+    for (const p of offer.pack || []) {
+      const typ = String(p.type || "").toLowerCase();
+      const allocated = parseFloat(p.allocated);
+      const used = parseFloat(p.used);
+      if (isNaN(allocated) || isNaN(used)) continue;
+      if (typ === "data") {
+        const div = UNIT_TO_GB[String(p.unit || "kilobytes").toLowerCase()] || UNIT_TO_GB.kilobytes;
+        const total = allocated / div;
+        pakete.push({
+          name: p.name || p.packName || offer.offerName || "Datenvolumen",
+          total,
+          left: (allocated - used) / div,
+          expires: p.nextExpirationDate || p.expirationDate || "",
+          unbegrenzt: p.unlimited === true || allocated < 0 || total >= 10000,
+        });
+      } else if (typ === "voice" || typ === "sms" || typ === "minutes") {
+        sonstige.push({
+          typ: typ === "sms" ? "SMS" : "Minuten",
+          left: Math.max(0, allocated - used) / (String(p.unit || "").toLowerCase() === "seconds" ? 60 : 1),
+          total: allocated / (String(p.unit || "").toLowerCase() === "seconds" ? 60 : 1),
+          unbegrenzt: p.unlimited === true || allocated < 0 || allocated >= 100000,
+        });
+      }
+    }
+  }
+  if (!pakete.length) throw new Error("Kein Datenpaket gefunden");
+
+  // Alle Datenpakete zusammen (Tarif + nachgebuchte Pakete). Ablaufdatum: das des
+  // Hauptpakets (größtes Paket), Zusatzpakete können früher ablaufen.
+  const unbegrenzt = pakete.some((p) => p.unbegrenzt);
+  const haupt = pakete.slice().sort((a, b) => b.total - a.total)[0];
+  return {
+    name: details.firstName || "",
+    tarif,
+    guthaben: parseFloat(offers.totalBalance),
+    left: unbegrenzt ? Infinity : pakete.reduce((s, p) => s + p.left, 0),
+    total: unbegrenzt ? Infinity : pakete.reduce((s, p) => s + p.total, 0),
+    unbegrenzt,
+    expires: haupt.expires,
+    pakete: pakete.map((p) => ({ ...p, left: p.unbegrenzt ? null : p.left, total: p.unbegrenzt ? null : p.total })),
+    sonstige,
+    vertraege,
+    vertragIndex: index,
+  };
+}
+
+/**
+ * Anmeldung am ALDI-TALK-Login (ForgeRock). Bei einem Fehler schickt ALDI TALK KEINE
+ * Fehlermeldung, sondern das Formular erneut – mit Hinweistext (falsche Zugangsdaten,
+ * Sperre) oder ohne (Rechenaufgabe nicht angenommen, dann noch einmal).
+ */
+async function anmelden(creds) {
+  await req(OVERVIEW).loadString(); // Sitzung anstoßen
+  let ergebnis = null;
   for (let versuch = 1; versuch <= 2; versuch++) {
-    const r1 = req(authUrl, authHeaders());
+    const r1 = req(AUTH_API, authHeaders());
     r1.method = "POST";
     r1.body = "{}";
-    const step1 = await r1.loadJSON();
-    if (!step1.authId || !step1.callbacks) throw new Error("Login-Antwort unerwartet");
+    const schritt1 = await ladeJSON(r1, "Login-Seite");
+    if (schritt1.successUrl) { ergebnis = schritt1; break; } // Sitzung war noch gültig
+    if (!schritt1.authId || !schritt1.callbacks) throw new Error("Login-Antwort unerwartet");
 
-    const pow = extractPow(step1.callbacks);
+    const pow = extractPow(schritt1.callbacks);
     const nonce = pow.work ? solvePow(pow.work, pow.difficulty) : "0";
-    const callbacks = fillCallbacks(step1.callbacks, nonce, creds);
+    const callbacks = fillCallbacks(schritt1.callbacks, nonce, creds);
 
-    const r2 = req(authUrl, authHeaders());
+    const r2 = req(AUTH_API, authHeaders());
     r2.method = "POST";
-    r2.body = JSON.stringify({ authId: step1.authId, callbacks });
-    step2 = await r2.loadJSON();
-    if (step2.successUrl) break;
+    r2.body = JSON.stringify({ authId: schritt1.authId, callbacks });
+    ergebnis = await ladeJSON(r2, "Login");
+    if (ergebnis.successUrl) break;
 
-    const hinweis = serverHinweis(step2.callbacks);
+    const hinweis = serverHinweis(ergebnis.callbacks);
     if (hinweis) {
       const fehler = new Error(hinweis);
       fehler.zugangsdaten = true;
       throw fehler;
     }
-    if (step2.message) throw new Error(step2.message);
+    if (ergebnis.message) throw new Error(ergebnis.message);
   }
-  if (!step2 || !step2.successUrl) throw new Error("Login abgelehnt (ohne Begründung)");
-
-  // 5) OIDC-Redirect-Kette abschließen
-  const succ = step2.successUrl.startsWith("http") ? step2.successUrl : AUTH + step2.successUrl;
-  await req(succ).loadString();
+  if (!ergebnis || !ergebnis.successUrl) throw new Error("Login abgelehnt (ohne Begründung)");
+  const ziel = ergebnis.successUrl.startsWith("http") ? ergebnis.successUrl : AUTH + ergebnis.successUrl;
+  await req(ziel).loadString();     // OIDC-Weiterleitungen abschließen
   await req(OVERVIEW).loadString();
-
-  // 6) Vertrag ermitteln
-  const nav = await req(PORTAL + BFF207 + "/v1/navigation-list", jsonHeaders()).loadJSON();
-  const details = nav.userDetails || {};
-  const subs = details.subscriptions || [];
-  if (!subs.length) throw new Error("Kein Vertrag gefunden");
-  const contractId = subs[0].contractId;
-
-  // 7) Tarif & Pakete
-  const offers = await req(
-    PORTAL + BFF209 + "/v1/offers?contractId=" + encodeURIComponent(contractId) + "&productType=",
-    jsonHeaders()
-  ).loadJSON();
-
-  const packs = [];
-  let offerName = "";
-  for (const offer of offers.subscribedOffers || []) {
-    if (!offerName && offer.offerName) offerName = offer.offerName;
-    for (const p of offer.pack || []) {
-      if (p.type !== "data") continue;
-      const allocated = parseFloat(p.allocated);
-      const used = parseFloat(p.used);
-      if (isNaN(allocated) || isNaN(used)) continue;
-      const div = UNIT_TO_GB[(p.unit || "kilobytes").toLowerCase()] || UNIT_TO_GB.kilobytes;
-      packs.push({
-        total: allocated / div,
-        left: (allocated - used) / div,
-        expires: p.nextExpirationDate || "",
-        ref: p.balanceAttributeReference || "",
-      });
-    }
-  }
-  if (!packs.length) throw new Error("Kein Datenpaket gefunden");
-
-  const main = packs[0];
-  return {
-    name: details.firstName || "",
-    offer: offerName,
-    balance: parseFloat(offers.totalBalance),
-    left: main.left,
-    total: main.total,
-    expires: main.expires,
-  };
 }
 
-/**
- * Hinweistext, den ALDI TALK bei abgelehnter Anmeldung ins Formular setzt
- * (z. B. "custom.alditalk.common.error$custom.alditalk.accountLock.accountLockMsg"),
- * in verständliches Deutsch übersetzt. Leer, wenn es keinen gibt.
- */
+/** Hinweistext im zurückgeschickten Login-Formular, auf Deutsch. Leer, wenn es keinen gibt. */
 function serverHinweis(callbacks) {
   for (const cb of callbacks || []) {
     if (cb.type !== "TextOutputCallback") continue;
     const out = (cb.output || []).find((o) => o.name === "message");
     const msg = out ? String(out.value || "") : "";
-    if (!msg || msg.indexOf("function ") === 0 || msg.indexOf("var ") >= 0) continue; // Rechenaufgaben-Skript
+    if (!msg || msg.indexOf("function ") === 0 || msg.indexOf("var ") >= 0) continue; // Rechenaufgabe
     if (/accountLock|locked|gesperrt/i.test(msg)) {
       return "Rufnummer oder Passwort falsch (nach mehreren Fehlversuchen sperrt ALDI TALK das Konto vorübergehend)";
     }
@@ -319,12 +364,37 @@ function serverHinweis(callbacks) {
 
 function req(url, extra) {
   const r = new Request(url);
+  r.timeoutInterval = ZEIT_LIMIT_S;
   r.headers = Object.assign({
     "User-Agent": UA,
     "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
   }, extra || {});
   return r;
+}
+
+/** JSON laden; bei HTML (Wartungsseite, Login-Umleitung) eine verständliche Meldung. */
+async function ladeJSON(r, was) {
+  const text = await r.loadString();
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    if (/wartung/i.test(text)) throw new Error("ALDI TALK: Wartungsarbeiten – später noch einmal");
+    throw new Error(`${was}: unerwartete Antwort vom Server`);
+  }
+}
+
+/** JSON einer Portal-Schnittstelle – null, wenn (noch) nicht angemeldet oder keine JSON-Antwort. */
+async function versucheJSON(url) {
+  try {
+    const r = req(url, { "Accept": "application/json, text/plain, */*", "Referer": OVERVIEW });
+    const text = await r.loadString();
+    const status = r.response && r.response.statusCode;
+    if (status && status >= 400) return null;
+    return JSON.parse(text);
+  } catch (e) {
+    return null;
+  }
 }
 
 function authHeaders() {
@@ -339,13 +409,7 @@ function authHeaders() {
   };
 }
 
-function jsonHeaders() {
-  return { "Accept": "application/json, text/plain, */*", "Referer": OVERVIEW };
-}
-
-// ============================================================
-//  Proof of Work (SHA-1)
-// ============================================================
+// --- Proof of Work (SHA-1) -----------------------------------
 function extractPow(callbacks) {
   for (const cb of callbacks) {
     if (cb.type !== "TextOutputCallback") continue;
@@ -382,8 +446,7 @@ function fillCallbacks(callbacks, nonce, creds) {
     } else if (cb.type === "PasswordCallback") {
       inputs.forEach((i) => (i.value = creds.pass));
     } else if (cb.type === "ConfirmationCallback") {
-      // Knopf "Anmelden" über seinen Namen suchen statt fest Nummer 2 –
-      // falls ALDI TALK die Reihenfolge der Knöpfe mal ändert.
+      // Knopf "Anmelden" über seinen Namen suchen statt fest Nummer 2.
       const opt = outputs.find((o) => o.name === "options");
       const liste = opt && Array.isArray(opt.value) ? opt.value : [];
       const idx = liste.findIndex((v) => /loginbtn$/.test(v));
@@ -405,15 +468,11 @@ function sha1(str) {
   b.push(0x80);
   while (b.length % 64 !== 56) b.push(0);
   for (let i = 7; i >= 0; i--) b.push(Math.floor(ml / Math.pow(2, i * 8)) & 0xff);
-
   const rotl = (n, s) => (n << s) | (n >>> (32 - s));
   let h0 = 0x67452301, h1 = 0xefcdab89, h2 = 0x98badcfe, h3 = 0x10325476, h4 = 0xc3d2e1f0;
   const w = new Array(80);
-
   for (let i = 0; i < b.length; i += 64) {
-    for (let j = 0; j < 16; j++) {
-      w[j] = (b[i + 4 * j] << 24) | (b[i + 4 * j + 1] << 16) | (b[i + 4 * j + 2] << 8) | b[i + 4 * j + 3];
-    }
+    for (let j = 0; j < 16; j++) w[j] = (b[i + 4 * j] << 24) | (b[i + 4 * j + 1] << 16) | (b[i + 4 * j + 2] << 8) | b[i + 4 * j + 3];
     for (let j = 16; j < 80; j++) w[j] = rotl(w[j - 3] ^ w[j - 8] ^ w[j - 14] ^ w[j - 16], 1);
     let a = h0, bb = h1, c = h2, d = h3, e = h4;
     for (let j = 0; j < 80; j++) {
@@ -431,221 +490,1056 @@ function sha1(str) {
 }
 
 // ============================================================
-//  Widget-Aufbau
+//  Verlauf, Tagesverbrauch, Prognose
 // ============================================================
-function buildWidget(d, family) {
+function merkeVerlauf(d) {
+  if (d.unbegrenzt) return;
+  const verlauf = liesJSON(verlaufName(), []);
+  const letzter = verlauf[verlauf.length - 1];
+  const jetzt = Date.now();
+  // Nur speichern, wenn sich etwas geändert hat oder eine Stunde vergangen ist.
+  if (letzter && Math.abs(letzter.left - d.left) < 0.0005 && jetzt - letzter.t < 3600 * 1000) return;
+  verlauf.push({ t: jetzt, left: d.left, total: d.total });
+  const grenze = jetzt - VERLAUF_TAGE * 86400000;
+  schreibJSON(verlaufName(), verlauf.filter((e) => e.t >= grenze));
+}
+
+function tagSchluessel(t) {
+  const d = new Date(t);
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+
+/**
+ * Verbrauch je Kalendertag (GB) der letzten `tage` Tage, geschätzt aus den Abfragen:
+ * jede Abnahme des Restvolumens zählt zum Tag der Abfrage. Zunahmen (Nachbuchen,
+ * neuer Monat) werden ignoriert. Tage ohne Abfrage bekommen 0 – der Verbrauch landet
+ * dann beim nächsten Tag mit Abfrage.
+ */
+function tagesVerbrauch(verlauf, tage) {
+  const proTag = {};
+  for (let i = 1; i < verlauf.length; i++) {
+    const diff = verlauf[i - 1].left - verlauf[i].left;
+    if (diff > 0) {
+      const k = tagSchluessel(verlauf[i].t);
+      proTag[k] = (proTag[k] || 0) + diff;
+    }
+  }
+  const ergebnis = [];
+  const heute = new Date();
+  heute.setHours(12, 0, 0, 0);
+  for (let i = tage - 1; i >= 0; i--) {
+    const t = heute.getTime() - i * 86400000;
+    const k = tagSchluessel(t);
+    ergebnis.push({ tag: k, t, gb: proTag[k] || 0, heute: i === 0 });
+  }
+  return ergebnis;
+}
+
+/** Durchschnittsverbrauch der letzten 7 Tage und wann das Volumen leer wäre. */
+function prognose(verlauf, d) {
+  const grenze = Date.now() - 7 * 86400000;
+  const teil = verlauf.filter((e) => e.t >= grenze);
+  if (teil.length < 2) return null;
+  const spanneTage = (teil[teil.length - 1].t - teil[0].t) / 86400000;
+  if (spanneTage < 0.5) return null; // zu wenig Daten für eine Aussage
+  let summe = 0;
+  for (let i = 1; i < teil.length; i++) summe += Math.max(0, teil[i - 1].left - teil[i].left);
+  const proTag = summe / Math.max(1, spanneTage);
+  if (proTag <= 0.0005) return { proTag: 0, reicht: true, leerAm: null };
+  const tageBisLeer = Math.max(0, d.left) / proTag;
+  const leerAm = Date.now() + tageBisLeer * 86400000;
+  const ende = parseDatum(d.expires);
+  return { proTag, leerAm, reicht: !ende || leerAm >= ende.getTime() };
+}
+
+// ============================================================
+//  Mitteilungen
+// ============================================================
+async function pruefeWarnungen(d) {
+  if (!einstellungen.mitteilungen || d.error || d.stale) return;
+  const zustand = liesJSON("alditalk-mitteilungen.json", {});
+  const zeitraum = d.expires || "ohne";
+  const schicke = async (id, titel, text) => {
+    try {
+      const n = new Notification();
+      n.identifier = "alditalk-" + id;
+      n.threadIdentifier = "alditalk";
+      n.title = titel;
+      n.body = text;
+      n.openURL = "scriptable:///run?scriptName=" + encodeURIComponent(SCRIPT_NAME) + "&param=dashboard";
+      await n.schedule();
+    } catch (e) { console.error(e); }
+  };
+  if (!d.unbegrenzt && d.left <= einstellungen.warnGB && zustand.volumen !== zeitraum) {
+    zustand.volumen = zeitraum;
+    await schicke("volumen", "ALDI TALK: Datenvolumen fast aufgebraucht",
+      `Nur noch ${fmtGB(d.left)} GB frei` + (d.resttage !== null ? ` – noch ${d.resttage} Tage Laufzeit.` : "."));
+  }
+  if (d.resttage !== null && d.resttage <= 3 && !isNaN(d.guthaben) && d.guthaben < einstellungen.warnGuthaben && zustand.guthaben !== zeitraum) {
+    zustand.guthaben = zeitraum;
+    await schicke("guthaben", "ALDI TALK: Guthaben aufladen",
+      `Verlängerung in ${d.resttage} Tag${d.resttage === 1 ? "" : "en"}, Guthaben nur ${fmtEuro(d.guthaben)}.`);
+  }
+  if (d.prognose && !d.prognose.reicht && zustand.prognose !== zeitraum && d.status === "gut") {
+    zustand.prognose = zeitraum;
+    await schicke("prognose", "ALDI TALK: Volumen wird knapp",
+      `Bei deinem Verbrauch (${fmtGB(d.prognose.proTag)} GB/Tag) ist es etwa am ${fmtDatum(d.prognose.leerAm)} leer.`);
+  }
+  schreibJSON("alditalk-mitteilungen.json", zustand);
+}
+
+// ============================================================
+//  Widgets
+// ============================================================
+function baueWidget(d, familie) {
+  if (familie === "accessoryCircular") return sperrRund(d);
+  if (familie === "accessoryRectangular") return sperrRechteck(d);
+  if (familie === "accessoryInline") return sperrZeile(d);
+
+  const D = design();
   const w = new ListWidget();
-  const small = family === "small";
-  w.setPadding(small ? 11 : 14, small ? 11 : 14, small ? 11 : 14, small ? 11 : 14);
-  const g = new LinearGradient();
-  g.colors = [C.bgTop, C.bgBottom];
-  g.locations = [0, 1];
-  w.backgroundGradient = g;
+  const groesse = { small: [158, 158], medium: [338, 158], large: [338, 354], extraLarge: [715, 354] }[familie] || [158, 158];
+  w.backgroundImage = hintergrundBild(D, groesse[0], groesse[1]);
+  w.refreshAfterDate = new Date(Date.now() + einstellungen.cacheMin * 60 * 1000);
 
   if (d.error) {
-    w.addSpacer();
-    const t = w.addText("ALDI TALK");
-    t.font = Font.semiboldSystemFont(13);
-    t.textColor = C.dim;
-    w.addSpacer(6);
-    const e = w.addText(d.error);
-    e.font = Font.systemFont(small ? 10 : 12);
-    e.textColor = C.text;
-    w.addSpacer();
+    fehlerAnsicht(w, d, D);
+    w.url = skriptURL("menu");
     return w;
   }
-
-  const pct = d.total > 0 ? Math.max(0, Math.min(1, d.left / d.total)) : 0;
-  const ringColor = d.left <= WARN_BELOW_GB ? C.red : pct < 0.33 ? C.orange : C.cyan;
-
-  if (small) return buildSmall(w, d, pct, ringColor);
-
-  const row = w.addStack();
-  row.centerAlignContent();
-
-  // Ring links
-  const img = row.addImage(ringImage(pct, fmtGB(d.left), "GB frei", ringColor));
-  img.imageSize = new Size(104, 104);
-
-  row.addSpacer(16);
-
-  // Infos rechts
-  const col = row.addStack();
-  col.layoutVertically();
-
-  const head = col.addStack();
-  head.centerAlignContent();
-  const dot = head.addText("●");
-  dot.font = Font.systemFont(9);
-  dot.textColor = ringColor;
-  head.addSpacer(5);
-  const title = head.addText("ALDI TALK");
-  title.font = Font.semiboldSystemFont(12);
-  title.textColor = C.text;
-
-  col.addSpacer(7);
-
-  addRow(col, "von", fmtGB(d.total) + " GB");
-  addRow(col, "Guthaben", isNaN(d.balance) ? "–" : d.balance.toFixed(2).replace(".", ",") + " €");
-  addRow(col, "gültig bis", fmtExpiry(d.expires));
-
-  col.addSpacer(9);
-
-  // Nachbuch-Button
-  const btn = col.addStack();
-  btn.setPadding(6, 11, 6, 11);
-  btn.cornerRadius = 13;
-  btn.backgroundColor = new Color("#f59c00");
-  btn.centerAlignContent();
-  btn.url = "scriptable:///run?scriptName=" + encodeURIComponent(SCRIPT_NAME) + "&param=book";
-  const bt = btn.addText("＋ 1 GB nachbuchen");
-  bt.font = Font.boldSystemFont(11);
-  bt.textColor = new Color("#1a1a1a");
-
-  w.addSpacer(4);
-  const foot = w.addText(
-    d.hinweis ? "⚠︎ " + d.hinweis : (d.stale ? "⚠︎ zuletzt " : "Stand ") + fmtTime(d.ts)
-  );
-  foot.font = Font.systemFont(9);
-  foot.textColor = d.hinweis ? C.orange : C.dim;
-  foot.centerAlignText();
-
+  if (familie === "small") klein(w, d, D);
+  else if (familie === "medium") mittel(w, d, D);
+  else gross(w, d, D);
   return w;
 }
 
-// --- Layout für das kleine, quadratische Widget ---------------
-function buildSmall(w, d, pct, ringColor) {
-  // Kopfzeile: Status links, Guthaben rechts
-  const head = w.addStack();
-  head.centerAlignContent();
-  const dot = head.addText("●");
-  dot.font = Font.systemFont(8);
-  dot.textColor = d.hinweis ? C.orange : d.stale ? C.dim : ringColor;
-  head.addSpacer(4);
-  const title = head.addText(d.hinweis ? "⚠︎ Login" : d.stale ? "⚠︎ " + fmtTime(d.ts) : "ALDI TALK");
-  title.font = Font.semiboldSystemFont(10);
-  title.textColor = d.hinweis ? C.orange : d.stale ? C.dim : C.text;
-  head.addSpacer();
-  const bal = head.addText(isNaN(d.balance) ? "" : d.balance.toFixed(2).replace(".", ",") + " €");
-  bal.font = Font.mediumSystemFont(10);
-  bal.textColor = C.dim;
-
-  w.addSpacer(4);
-
-  // Ring mittig
-  const ringRow = w.addStack();
-  ringRow.addSpacer();
-  const img = ringRow.addImage(
-    ringImage(pct, fmtGB(d.left), "von " + fmtGB(d.total) + " GB", ringColor)
-  );
-  img.imageSize = new Size(84, 84);
-  ringRow.addSpacer();
-
-  w.addSpacer(5);
-
-  // Fußzeile: Button-Pille links, Restlaufzeit rechts
-  const foot = w.addStack();
-  foot.centerAlignContent();
-  const btn = foot.addStack();
-  btn.setPadding(5, 9, 5, 9);
-  btn.cornerRadius = 11;
-  btn.backgroundColor = C.orange;
-  const bt = btn.addText("＋ 1 GB");
-  bt.font = Font.boldSystemFont(10);
-  bt.textColor = new Color("#1a1a1a");
-  foot.addSpacer();
-  const days = foot.addText(fmtDays(d.expires));
-  days.font = Font.mediumSystemFont(10);
-  days.textColor = C.dim;
-
-  return w;
+/** SF-Symbol als Bild – mit Rückfall, falls es das Symbol auf dieser iOS-Version nicht gibt. */
+function sfBild(name) {
+  const s = SFSymbol.named(name) || SFSymbol.named("circle.fill");
+  return s.image;
 }
 
-function addRow(stack, label, value) {
-  const s = stack.addStack();
-  s.centerAlignContent();
-  const l = s.addText(label);
-  l.font = Font.systemFont(10);
-  l.textColor = C.dim;
-  s.addSpacer(6);
-  const v = s.addText(value);
-  v.font = Font.mediumSystemFont(11);
-  v.textColor = C.text;
-  s.addSpacer(2);
+function skriptURL(p) {
+  return "scriptable:///run?scriptName=" + encodeURIComponent(SCRIPT_NAME) + (p ? "&param=" + p : "");
 }
 
-function ringImage(pct, centerText, subText, color) {
-  const size = 320;           // wird herunterskaliert -> sehr scharf
-  const lw = 28;
-  const ctx = new DrawContext();
-  ctx.size = new Size(size, size);
-  ctx.opaque = false;
-  ctx.respectScreenScale = true;
+function statusFarbe(d, D) {
+  if (d.status === "leer" || d.status === "kritisch") return farbe(D.dunkel ? STATUS.kritischDunkel : STATUS.kritisch);
+  if (d.status === "warnung") return farbe(STATUS.warnung);
+  return farbe(D.akzent);
+}
 
-  const r = (size - lw) / 2;
-  const cx = size / 2;
-  const cy = size / 2;
+function statusText(d) {
+  return { leer: "⚠︎ aufgebraucht", kritisch: "⚠︎ fast leer", warnung: "⚠︎ wird knapp" }[d.status] || "";
+}
 
-  // Hintergrund-Ring
-  ctx.setStrokeColor(C.track);
-  ctx.setLineWidth(lw);
-  ctx.strokeEllipse(new Rect(lw / 2, lw / 2, size - lw, size - lw));
+function fehlerAnsicht(w, d, D) {
+  w.setPadding(14, 14, 14, 14);
+  kopf(w, D, "ALDI TALK");
+  w.addSpacer();
+  const sym = w.addImage(sfBild(d.zugangsdaten ? "person.crop.circle.badge.exclamationmark" : "exclamationmark.triangle.fill"));
+  sym.imageSize = new Size(26, 26);
+  sym.tintColor = farbe(STATUS.warnung);
+  w.addSpacer(6);
+  const t = w.addText(d.error);
+  t.font = Font.mediumSystemFont(12);
+  t.textColor = farbe(D.text);
+  t.minimumScaleFactor = 0.7;
+  w.addSpacer();
+  const h = w.addText("Tippen zum Öffnen");
+  h.font = Font.systemFont(10);
+  h.textColor = farbe(D.text3);
+}
 
-  // Fortschritt als Punktkette (DrawContext kennt keine Bögen)
-  ctx.setFillColor(color);
-  const end = 360 * pct;
-  for (let a = 0; a <= end; a += 1.2) {
-    const rad = (a - 90) * (Math.PI / 180);
-    const x = cx + r * Math.cos(rad) - lw / 2;
-    const y = cy + r * Math.sin(rad) - lw / 2;
-    ctx.fillEllipse(new Rect(x, y, lw, lw));
+function kopf(stack, D, titel, rechts) {
+  const z = stack.addStack();
+  z.centerAlignContent();
+  const logo = z.addStack();
+  logo.backgroundColor = farbe(D.akzent);
+  logo.cornerRadius = 4;
+  logo.setPadding(2, 4, 2, 4);
+  const lt = logo.addText("AT");
+  lt.font = Font.heavyRoundedSystemFont(9);
+  lt.textColor = Color.white();
+  z.addSpacer(5);
+  const t = z.addText(titel);
+  t.font = Font.semiboldRoundedSystemFont(12);
+  t.textColor = farbe(D.text);
+  t.lineLimit = 1;
+  z.addSpacer();
+  if (rechts) {
+    const r = z.addText(rechts);
+    r.font = Font.mediumRoundedSystemFont(11);
+    r.textColor = farbe(D.text2);
+    r.lineLimit = 1;
+  }
+  return z;
+}
+
+function fussZeile(stack, d, D) {
+  const f = stack.addStack();
+  f.centerAlignContent();
+  const sym = f.addImage(sfBild(d.stale ? "exclamationmark.arrow.circlepath" : "checkmark.circle.fill"));
+  sym.imageSize = new Size(9, 9);
+  sym.tintColor = d.stale ? farbe(STATUS.warnung) : farbe(D.text3);
+  f.addSpacer(3);
+  const t = f.addText(d.hinweis ? d.hinweis : (d.stale ? "Stand " : "Aktualisiert ") + fmtRelativ(d.ts));
+  t.font = Font.systemFont(9);
+  t.textColor = d.hinweis ? farbe(STATUS.warnung) : farbe(D.text3);
+  t.lineLimit = 1;
+  t.minimumScaleFactor = 0.7;
+  return f;
+}
+
+// --- klein ----------------------------------------------------
+function klein(w, d, D) {
+  w.setPadding(12, 12, 10, 12);
+  w.url = skriptURL("menu");
+  kopf(w, D, "ALDI TALK", isNaN(d.guthaben) ? "" : fmtEuro(d.guthaben));
+  w.addSpacer();
+  const reihe = w.addStack();
+  reihe.addSpacer();
+  const ring = reihe.addImage(ringBild(d, D, 260, false));
+  ring.imageSize = new Size(88, 88);
+  reihe.addSpacer();
+  w.addSpacer();
+  const f = w.addStack();
+  f.centerAlignContent();
+  const links = f.addText(d.status !== "gut" ? statusText(d) : (d.resttage !== null ? `noch ${d.resttage} T` : ""));
+  links.font = Font.semiboldRoundedSystemFont(11);
+  links.textColor = d.status !== "gut" ? statusFarbe(d, D) : farbe(D.text2);
+  f.addSpacer();
+  if (d.tagesbudget !== null) {
+    const r = f.addText(`${fmtGB(d.tagesbudget)} GB/Tag`);
+    r.minimumScaleFactor = 0.7;
+    r.font = Font.mediumRoundedSystemFont(11);
+    r.textColor = farbe(D.text2);
+  }
+}
+
+// --- mittel ---------------------------------------------------
+function mittel(w, d, D) {
+  w.setPadding(14, 14, 12, 14);
+  w.url = skriptURL("dashboard");
+  const reihe = w.addStack();
+  reihe.centerAlignContent();
+  const ring = reihe.addImage(ringBild(d, D, 300, true));
+  ring.imageSize = new Size(108, 108);
+  reihe.addSpacer(14);
+
+  const rechts = reihe.addStack();
+  rechts.layoutVertically();
+  kopf(rechts, D, d.tarif || "ALDI TALK");
+  rechts.addSpacer(6);
+  zeile(rechts, D, "creditcard.fill", "Guthaben", isNaN(d.guthaben) ? "–" : fmtEuro(d.guthaben));
+  zeile(rechts, D, "calendar", "gültig bis", fmtAblauf(d.expires));
+  if (d.tagesbudget !== null) zeile(rechts, D, "speedometer", "pro Tag", fmtGB(d.tagesbudget) + " GB");
+  else if (d.status !== "gut") zeile(rechts, D, "exclamationmark.triangle.fill", "Status", statusText(d).replace("⚠︎ ", ""), statusFarbe(d, D));
+  rechts.addSpacer(6);
+
+  const knoepfe = rechts.addStack();
+  knoepfe.centerAlignContent();
+  pille(knoepfe, D, "plus", "Nachbuchen", skriptURL("book"), true);
+  knoepfe.addSpacer(6);
+  pille(knoepfe, D, "arrow.clockwise", null, skriptURL("refresh"), false);
+
+  w.addSpacer();
+  fussZeile(w, d, D);
+}
+
+function zeile(stack, D, symbol, label, wert, wertFarbe) {
+  const z = stack.addStack();
+  z.centerAlignContent();
+  const s = z.addImage(sfBild(symbol));
+  s.imageSize = new Size(10, 10);
+  s.tintColor = farbe(D.text3);
+  z.addSpacer(5);
+  const l = z.addText(label);
+  l.font = Font.systemFont(11);
+  l.textColor = farbe(D.text2);
+  z.addSpacer(6);
+  const v = z.addText(wert);
+  v.font = Font.semiboldRoundedSystemFont(12);
+  v.textColor = wertFarbe || farbe(D.text);
+  v.lineLimit = 1;
+  v.minimumScaleFactor = 0.7;
+  stack.addSpacer(2);
+}
+
+function pille(stack, D, symbol, text, url, haupt) {
+  const p = stack.addStack();
+  p.centerAlignContent();
+  p.cornerRadius = 12;
+  p.setPadding(5, text ? 10 : 7, 5, text ? 10 : 7);
+  p.backgroundColor = haupt ? farbe(D.knopf) : farbe(D.karte);
+  p.url = url;
+  const s = p.addImage(sfBild(symbol));
+  s.imageSize = new Size(10, 10);
+  s.tintColor = haupt ? farbe(D.knopfText) : farbe(D.text);
+  if (text) {
+    p.addSpacer(4);
+    const t = p.addText(text);
+    t.font = Font.boldRoundedSystemFont(11);
+    t.textColor = haupt ? farbe(D.knopfText) : farbe(D.text);
+  }
+}
+
+// --- groß -----------------------------------------------------
+function gross(w, d, D) {
+  w.setPadding(16, 16, 12, 16);
+  w.url = skriptURL("dashboard");
+  kopf(w, D, d.tarif || "ALDI TALK", d.name ? "Hallo " + d.name : "");
+  w.addSpacer(10);
+
+  const oben = w.addStack();
+  oben.centerAlignContent();
+  const ring = oben.addImage(ringBild(d, D, 330, true));
+  ring.imageSize = new Size(124, 124);
+  oben.addSpacer(14);
+  const kacheln = oben.addStack();
+  kacheln.layoutVertically();
+  const r1 = kacheln.addStack();
+  kachel(r1, D, "Guthaben", isNaN(d.guthaben) ? "–" : fmtEuro(d.guthaben));
+  r1.addSpacer(8);
+  kachel(r1, D, "Laufzeit", d.resttage === null ? "–" : `${d.resttage} Tage`, fmtAblauf(d.expires, false));
+  kacheln.addSpacer(8);
+  const r2 = kacheln.addStack();
+  kachel(r2, D, "Tagesbudget", d.tagesbudget === null ? "–" : fmtGB(d.tagesbudget) + " GB");
+  r2.addSpacer(8);
+  if (d.prognose && d.prognose.proTag > 0) {
+    kachel(r2, D, "Prognose", d.prognose.reicht ? "reicht ✓" : "⚠︎ " + fmtDatum(d.prognose.leerAm),
+      `${fmtGB(d.prognose.proTag)} GB/Tag`, d.prognose.reicht ? null : farbe(STATUS.warnung));
+  } else {
+    kachel(r2, D, "Status", d.status === "gut" ? "alles gut" : statusText(d), null, d.status === "gut" ? null : statusFarbe(d, D));
   }
 
-  // Text in der Mitte
-  ctx.setTextAlignedCenter();
-  const big = centerText.length > 4 ? 64 : 78;
-  ctx.setFont(Font.boldSystemFont(big));
-  ctx.setTextColor(new Color("#ffffff"));
-  ctx.drawTextInRect(centerText, new Rect(0, cy - big + 8, size, big + 14));
+  w.addSpacer(12);
+  const titel = w.addStack();
+  const tt = titel.addText("Verbrauch pro Tag");
+  tt.font = Font.semiboldSystemFont(11);
+  tt.textColor = farbe(D.text2);
+  titel.addSpacer();
+  const max = Math.max(...d.tageVerbrauch.map((t) => t.gb));
+  const ht = titel.addText(max > 0 ? `heute ${fmtGB(d.tageVerbrauch[d.tageVerbrauch.length - 1].gb)} GB` : "Verlauf sammelt sich noch");
+  ht.font = Font.systemFont(10);
+  ht.textColor = farbe(D.text3);
+  w.addSpacer(4);
+  const diagramm = w.addImage(balkenBild(d.tageVerbrauch, d.tagesbudget, D, 306, 62));
+  diagramm.imageSize = new Size(306, 62);
 
-  ctx.setFont(Font.mediumSystemFont(30));
-  ctx.setTextColor(new Color("#ffffff", 0.65));
-  ctx.drawTextInRect(subText, new Rect(0, cy + 18, size, 40));
+  if (d.pakete && d.pakete.length > 1) {
+    w.addSpacer(8);
+    for (const p of d.pakete.slice(0, 2)) paketZeile(w, p, D);
+  }
 
+  w.addSpacer();
+  const unten = w.addStack();
+  unten.centerAlignContent();
+  fussZeile(unten, d, D);
+  unten.addSpacer();
+  pille(unten, D, "plus", "Nachbuchen", skriptURL("book"), true);
+  unten.addSpacer(6);
+  pille(unten, D, "arrow.clockwise", null, skriptURL("refresh"), false);
+}
+
+function kachel(stack, D, label, wert, unter, wertFarbe) {
+  const k = stack.addStack();
+  k.layoutVertically();
+  k.size = new Size(84, 46);
+  k.cornerRadius = 10;
+  k.backgroundColor = farbe(D.karte);
+  k.setPadding(6, 8, 6, 8);
+  const l = k.addText(label);
+  l.font = Font.systemFont(9);
+  l.textColor = farbe(D.text2);
+  const v = k.addText(wert);
+  v.font = Font.semiboldRoundedSystemFont(13);
+  v.textColor = wertFarbe || farbe(D.text);
+  v.lineLimit = 1;
+  v.minimumScaleFactor = 0.6;
+  if (unter) {
+    const u = k.addText(unter);
+    u.font = Font.systemFont(8);
+    u.textColor = farbe(D.text3);
+    u.lineLimit = 1;
+  }
+}
+
+function paketZeile(stack, p, D) {
+  const z = stack.addStack();
+  z.centerAlignContent();
+  const n = z.addText(p.name);
+  n.font = Font.systemFont(10);
+  n.textColor = farbe(D.text2);
+  n.lineLimit = 1;
+  z.addSpacer();
+  const v = z.addText(p.unbegrenzt ? "unbegrenzt" : `${fmtGB(p.left)} / ${fmtGB(p.total)} GB`);
+  v.font = Font.mediumRoundedSystemFont(10);
+  v.textColor = farbe(D.text);
+  stack.addSpacer(2);
+}
+
+// --- Sperrbildschirm ------------------------------------------
+function sperrRund(d) {
+  const w = new ListWidget();
+  w.addAccessoryWidgetBackground = true;
+  w.url = skriptURL("dashboard");
+  if (d.error) {
+    const t = w.addText("!");
+    t.font = Font.boldRoundedSystemFont(20);
+    t.centerAlignText();
+    return w;
+  }
+  const img = w.addImage(sperrRingBild(d));
+  img.imageSize = new Size(58, 58);
+  img.centerAlignImage();
+  return w;
+}
+
+function sperrRechteck(d) {
+  const w = new ListWidget();
+  w.url = skriptURL("dashboard");
+  if (d.error) {
+    const t = w.addText("ALDI TALK: " + d.error);
+    t.font = Font.systemFont(11);
+    t.minimumScaleFactor = 0.7;
+    return w;
+  }
+  const k = w.addText("ALDI TALK" + (d.stale ? " ⚠︎" : ""));
+  k.font = Font.semiboldRoundedSystemFont(11);
+  const v = w.addText(d.unbegrenzt ? "∞ unbegrenzt" : `${fmtGB(d.left)} GB frei`);
+  v.font = Font.boldRoundedSystemFont(17);
+  v.minimumScaleFactor = 0.8;
+  const img = w.addImage(sperrBalkenBild(d.pct));
+  img.imageSize = new Size(140, 6);
+  const u = w.addText([d.resttage !== null ? `${d.resttage} T` : null, isNaN(d.guthaben) ? null : fmtEuro(d.guthaben)].filter(Boolean).join(" · "));
+  u.font = Font.systemFont(10);
+  return w;
+}
+
+function sperrZeile(d) {
+  const w = new ListWidget();
+  w.url = skriptURL("dashboard");
+  const t = w.addText(d.error ? "ALDI TALK ⚠︎" : `📶 ${d.unbegrenzt ? "∞" : fmtGB(d.left) + " GB"}${d.resttage !== null ? " · " + d.resttage + " T" : ""}`);
+  t.font = Font.mediumSystemFont(12);
+  return w;
+}
+
+// ============================================================
+//  Zeichnungen
+// ============================================================
+/** Hintergrund: Verlauf mit weichen Lichtflecken. */
+function hintergrundBild(D, breite, hoehe) {
+  const s = 2;
+  const ctx = new DrawContext();
+  ctx.size = new Size(breite * s, hoehe * s);
+  ctx.opaque = true;
+  ctx.respectScreenScale = false;
+  // Verlauf von oben nach unten in feinen Streifen.
+  const oben = hexRGB(D.oben), unten = hexRGB(D.unten);
+  const streifen = 48;
+  for (let i = 0; i < streifen; i++) {
+    const t = i / (streifen - 1);
+    ctx.setFillColor(new Color(rgbHex(mischeRGB(oben, unten, t))));
+    ctx.fillRect(new Rect(0, Math.floor(i * hoehe * s / streifen), breite * s, Math.ceil(hoehe * s / streifen) + 1));
+  }
+  // Zwei weiche Lichtflecken (übereinanderliegende, fast durchsichtige Kreise).
+  // Viele sehr zarte Kreise übereinander ergeben einen weichen Verlauf ohne sichtbare Stufen.
+  const flecken = [
+    { x: breite * s * 0.92, y: -hoehe * s * 0.05, r: Math.max(breite, hoehe) * s * 0.75, gesamt: D.dunkel ? 0.22 : 0.10 },
+    { x: -breite * s * 0.1, y: hoehe * s * 1.05, r: Math.max(breite, hoehe) * s * 0.55, gesamt: D.dunkel ? 0.14 : 0.07 },
+  ];
+  const stufen = 40;
+  for (const f of flecken) {
+    for (let k = stufen; k >= 1; k--) {
+      const r = f.r * Math.pow(k / stufen, 0.8);
+      ctx.setFillColor(new Color(D.glanz.slice(0, 7), f.gesamt / stufen));
+      ctx.fillEllipse(new Rect(f.x - r, f.y - r, r * 2, r * 2));
+    }
+  }
   return ctx.getImage();
+}
+
+/**
+ * Ring (Messinstrument): Füllung in der Statusfarbe mit leichtem Verlauf, Spur in einem
+ * helleren Schritt, Markierungen bei 25/50/75 %, in der Mitte die freien GB.
+ */
+function ringBild(d, D, groesse, mitUntertitel) {
+  const ctx = new DrawContext();
+  ctx.size = new Size(groesse, groesse);
+  ctx.opaque = false;
+  ctx.respectScreenScale = true;
+  const lw = groesse * 0.085;
+  const r = (groesse - lw) / 2 - groesse * 0.02;
+  const c = groesse / 2;
+
+  ctx.setStrokeColor(farbe(D.spur));
+  ctx.setLineWidth(lw);
+  ctx.strokeEllipse(new Rect(c - r, c - r, r * 2, r * 2));
+
+  const fuell = statusFarbe(d, D);
+  const basis = hexRGB(fuell.hex);
+  const hell = mischeRGB(basis, [255, 255, 255], 0.35);
+  const ende = 360 * d.pct;
+  // Leuchten hinter der Füllung
+  for (let a = 0; a <= ende; a += 3) {
+    const rad = (a - 90) * Math.PI / 180;
+    const g = lw * 1.7;
+    ctx.setFillColor(new Color(fuell.hex, 0.06));
+    ctx.fillEllipse(new Rect(c + r * Math.cos(rad) - g / 2, c + r * Math.sin(rad) - g / 2, g, g));
+  }
+  for (let a = 0; a <= ende; a += 0.8) {
+    const rad = (a - 90) * Math.PI / 180;
+    const t = ende > 0 ? a / ende : 0;
+    ctx.setFillColor(new Color(rgbHex(mischeRGB(hell, basis, t))));
+    ctx.fillEllipse(new Rect(c + r * Math.cos(rad) - lw / 2, c + r * Math.sin(rad) - lw / 2, lw, lw));
+  }
+  // Markierungen 25/50/75 %
+  ctx.setFillColor(farbe(D.dunkel ? "#ffffff59" : "#0c1c3a40"));
+  for (const p of [0.25, 0.5, 0.75]) {
+    const rad = (p * 360 - 90) * Math.PI / 180;
+    const m = lw * 0.22;
+    ctx.fillEllipse(new Rect(c + (r - lw * 0.95) * Math.cos(rad) - m, c + (r - lw * 0.95) * Math.sin(rad) - m, m * 2, m * 2));
+  }
+
+  ctx.setTextAlignedCenter();
+  const zahl = d.unbegrenzt ? "∞" : fmtGB(d.left);
+  const gross = zahl.length > 4 ? groesse * 0.2 : groesse * 0.25;
+  ctx.setFont(Font.boldRoundedSystemFont(gross));
+  ctx.setTextColor(farbe(D.text));
+  ctx.drawTextInRect(zahl, new Rect(0, c - gross * 0.78, groesse, gross * 1.25));
+  ctx.setFont(Font.mediumRoundedSystemFont(groesse * 0.085));
+  ctx.setTextColor(farbe(D.text2));
+  const unter = d.unbegrenzt ? "unbegrenzt" : (mitUntertitel ? `GB von ${fmtGB(d.total)}` : "GB frei");
+  ctx.drawTextInRect(unter, new Rect(0, c + gross * 0.42, groesse, groesse * 0.12));
+  return ctx.getImage();
+}
+
+/**
+ * Säulen "Verbrauch pro Tag" (eine Reihe → keine Legende): heute in der Akzentfarbe,
+ * die Tage davor zurückgenommen (Hervorhebung). Säulen höchstens 24 px breit, oben
+ * 4 px abgerundet, unten gerade; eine feine Linie markiert das Tagesbudget.
+ */
+function balkenBild(tage, budget, D, breite, hoehe) {
+  const s = 3;
+  const ctx = new DrawContext();
+  ctx.size = new Size(breite * s, hoehe * s);
+  ctx.opaque = false;
+  ctx.respectScreenScale = false;
+  const basisY = (hoehe - 12) * s;
+  const max = Math.max(budget || 0, ...tage.map((t) => t.gb), 0.001);
+  const fach = breite * s / tage.length;
+  const saeule = Math.min(24 * s / 2, fach * 0.62);
+  // Grundlinie (Haarlinie)
+  ctx.setFillColor(farbe(D.spur));
+  ctx.fillRect(new Rect(0, basisY, breite * s, 1 * s / 2));
+  tage.forEach((t, i) => {
+    const h = t.gb > 0 ? Math.max(2 * s, (t.gb / max) * (basisY - 4 * s)) : 0;
+    const x = i * fach + (fach - saeule) / 2;
+    if (h > 0) {
+      // Oben abgerundet, unten gerade – als ein Pfad, damit sich halbdurchsichtige Flächen nicht überlagern.
+      const r = Math.min(4 * s / 2, saeule / 2, h);
+      const oben = basisY - h;
+      const p = new Path();
+      p.move(new Point(x, basisY));
+      p.addLine(new Point(x, oben + r));
+      p.addQuadCurve(new Point(x + r, oben), new Point(x, oben));
+      p.addLine(new Point(x + saeule - r, oben));
+      p.addQuadCurve(new Point(x + saeule, oben + r), new Point(x + saeule, oben));
+      p.addLine(new Point(x + saeule, basisY));
+      p.closeSubpath();
+      ctx.addPath(p);
+      ctx.setFillColor(t.heute ? farbe(D.akzent) : farbe(D.grau));
+      ctx.fillPath();
+    }
+    // Wochentag unter jeder zweiten Säule und unter heute
+    if (i % 2 === (tage.length - 1) % 2) {
+      ctx.setFont(Font.mediumSystemFont(8 * s));
+      ctx.setTextColor(t.heute ? farbe(D.text) : farbe(D.text3));
+      ctx.setTextAlignedCenter();
+      const tag = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"][new Date(t.t).getDay()];
+      ctx.drawTextInRect(t.heute ? "heute" : tag, new Rect(i * fach - fach, basisY + 2 * s, fach * 3, 10 * s));
+    }
+  });
+  // Tagesbudget als Bezugslinie (durchgezogen, Haarlinie) mit Beschriftung
+  if (budget && budget > 0) {
+    const y = basisY - (budget / max) * (basisY - 4 * s);
+    ctx.setFillColor(farbe(D.text2));
+    ctx.fillRect(new Rect(0, y, breite * s, s / 2));
+    ctx.setFont(Font.mediumSystemFont(8 * s));
+    ctx.setTextColor(farbe(D.text2));
+    ctx.setTextAlignedRight();
+    ctx.drawTextInRect("Budget", new Rect(0, y - 11 * s, breite * s, 10 * s));
+  }
+  return ctx.getImage();
+}
+
+function sperrRingBild(d) {
+  const g = 120;
+  const ctx = new DrawContext();
+  ctx.size = new Size(g, g);
+  ctx.opaque = false;
+  const lw = 11;
+  const r = (g - lw) / 2;
+  ctx.setStrokeColor(new Color("#ffffff", 0.3));
+  ctx.setLineWidth(lw);
+  ctx.strokeEllipse(new Rect(g / 2 - r, g / 2 - r, r * 2, r * 2));
+  ctx.setFillColor(Color.white());
+  for (let a = 0; a <= 360 * d.pct; a += 1.5) {
+    const rad = (a - 90) * Math.PI / 180;
+    ctx.fillEllipse(new Rect(g / 2 + r * Math.cos(rad) - lw / 2, g / 2 + r * Math.sin(rad) - lw / 2, lw, lw));
+  }
+  ctx.setTextAlignedCenter();
+  ctx.setTextColor(Color.white());
+  ctx.setFont(Font.boldRoundedSystemFont(30));
+  ctx.drawTextInRect(d.unbegrenzt ? "∞" : fmtGB(d.left, true), new Rect(0, 30, g, 38));
+  ctx.setFont(Font.mediumRoundedSystemFont(15));
+  ctx.drawTextInRect("GB", new Rect(0, 68, g, 20));
+  return ctx.getImage();
+}
+
+function sperrBalkenBild(pct) {
+  const ctx = new DrawContext();
+  ctx.size = new Size(280, 12);
+  ctx.opaque = false;
+  const spur = new Path();
+  spur.addRoundedRect(new Rect(0, 0, 280, 12), 6, 6);
+  ctx.addPath(spur);
+  ctx.setFillColor(new Color("#ffffff", 0.3));
+  ctx.fillPath();
+  if (pct > 0) {
+    const f = new Path();
+    f.addRoundedRect(new Rect(0, 0, Math.max(12, 280 * pct), 12), 6, 6);
+    ctx.addPath(f);
+    ctx.setFillColor(Color.white());
+    ctx.fillPath();
+  }
+  return ctx.getImage();
+}
+
+function hexRGB(hex) {
+  const h = String(hex).replace("#", "").slice(0, 6);
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+function rgbHex(rgb) { return "#" + rgb.map((v) => Math.round(v).toString(16).padStart(2, "0")).join(""); }
+function mischeRGB(a, b, t) { return a.map((v, i) => v + (b[i] - v) * t); }
+
+// ============================================================
+//  Übersicht (in der App) – ausführliche Ansicht mit Diagramm
+// ============================================================
+async function zeigeDashboard(d) {
+  const wv = new WebView();
+  wv.shouldAllowRequest = (anfrage) => {
+    const url = String(anfrage.url || "");
+    if (url.startsWith("aldi://")) {
+      const was = url.slice(7);
+      if (was === "book") Safari.openInApp(BOOKING, false);
+      if (was === "portal") Safari.openInApp(OVERVIEW, false);
+      if (was === "refresh") {
+        holeDaten({ erzwingen: true }).then((neu) => wv.loadHTML(dashboardHTML(neu)));
+      }
+      return false;
+    }
+    return true;
+  };
+  await wv.loadHTML(dashboardHTML(d));
+  await wv.present(false);
+}
+
+function dashboardHTML(d) {
+  const daten = JSON.stringify({
+    ...d,
+    left: d.unbegrenzt ? null : d.left,
+    total: d.unbegrenzt ? null : d.total,
+    statusText: statusText(d),
+    resttageText: d.resttage === null ? "–" : `${d.resttage} Tage`,
+    ablauf: fmtAblauf(d.expires, false),
+    aktualisiert: d.ts ? fmtRelativ(d.ts) : "",
+    warnGB: einstellungen.warnGB,
+    version: VERSION,
+  }).replace(/</g, "\\u003c");
+  return `<!DOCTYPE html><html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+.viz-root { color-scheme: light;
+  --page: #f9f9f7; --surface-1: #fcfcfb; --text-primary: #0b0b0b; --text-secondary: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --baseline: #c3c2b7; --border: rgba(11,11,11,0.10);
+  --series-1: #2a78d6; --track: #cde2fb; --deemph: #c3c2b7;
+  --warning: #fab219; --critical: #d03b3b; --good: #0ca30c; --knopf: #f59c00; }
+@media (prefers-color-scheme: dark) { .viz-root { color-scheme: dark;
+  --page: #0d0d0d; --surface-1: #1a1a19; --text-primary: #ffffff; --text-secondary: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --baseline: #383835; --border: rgba(255,255,255,0.10);
+  --series-1: #3987e5; --track: #184f95; --deemph: #383835; } }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, -apple-system, sans-serif; }
+.viz-root { background: var(--page); color: var(--text-primary); min-height: 100vh; padding: 20px 16px 40px; }
+header { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+.logo { background: #2a9ee0; color: #fff; font-weight: 800; font-size: 13px; border-radius: 6px; padding: 3px 6px; }
+h1 { font-size: 17px; margin: 0; } .sub { color: var(--text-secondary); font-size: 13px; }
+.karte { background: var(--surface-1); border: 1px solid var(--border); border-radius: 16px; padding: 16px; margin-bottom: 12px; }
+.held { font-size: 52px; font-weight: 650; line-height: 1; } .held small { font-size: 20px; color: var(--text-secondary); font-weight: 500; }
+.meter { height: 10px; border-radius: 5px; background: var(--track); margin: 14px 0 8px; overflow: hidden; }
+.meter > div { height: 100%; border-radius: 5px; background: var(--series-1); }
+.status { font-size: 13px; color: var(--text-secondary); display: flex; gap: 6px; align-items: center; }
+.status .punkt { width: 8px; height: 8px; border-radius: 50%; background: var(--good); }
+.kpis { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+.kpi { background: var(--surface-1); border: 1px solid var(--border); border-radius: 14px; padding: 12px; }
+.kpi .l { font-size: 12px; color: var(--text-secondary); } .kpi .w { font-size: 20px; font-weight: 600; margin-top: 2px; } .kpi .u { font-size: 11px; color: var(--muted); }
+h2 { font-size: 14px; margin: 0 0 2px; } .hinweis { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+svg text { font-family: system-ui, -apple-system, sans-serif; }
+.tooltip { position: fixed; pointer-events: none; background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 6px 9px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.18); display: none; }
+.tooltip b { display: block; font-size: 14px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+td, th { padding: 5px 4px; border-bottom: 1px solid var(--grid); text-align: left; } td:last-child, th:last-child { text-align: right; }
+summary { cursor: pointer; font-size: 13px; color: var(--text-secondary); margin-top: 8px; }
+.pakete div { display: flex; justify-content: space-between; font-size: 14px; padding: 6px 0; border-bottom: 1px solid var(--grid); }
+.knoepfe { display: flex; gap: 10px; margin-top: 4px; }
+.knoepfe a { flex: 1; text-align: center; text-decoration: none; font-weight: 650; font-size: 15px; padding: 13px; border-radius: 14px; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border); }
+.knoepfe a.haupt { background: var(--knopf); color: #1a1a1a; border-color: transparent; }
+.fuss { text-align: center; font-size: 11px; color: var(--muted); margin-top: 14px; }
+</style></head><body><div class="viz-root">
+<header><span class="logo">AT</span><div><h1 id="tarif"></h1><div class="sub" id="nummer"></div></div></header>
+<div class="karte"><div class="held" id="held"></div><div class="meter"><div id="fuellung"></div></div><div class="status"><span class="punkt" id="punkt"></span><span id="statustext"></span></div></div>
+<div class="kpis" id="kpis"></div>
+<div class="karte"><h2>Verbrauch pro Tag</h2><div class="hinweis">Letzte 14 Tage, geschätzt aus den Abfragen des Widgets</div>
+<svg id="diagramm" width="100%" height="170" role="img" aria-label="Verbrauch pro Tag der letzten 14 Tage"></svg>
+<details><summary>Als Tabelle anzeigen</summary><table id="tabelle"><thead><tr><th>Tag</th><th>Verbrauch</th></tr></thead><tbody></tbody></table></details></div>
+<div class="karte pakete" id="pakete"><h2>Pakete</h2></div>
+<div class="knoepfe"><a class="haupt" href="aldi://book">＋ Nachbuchen</a><a href="aldi://refresh">↻ Aktualisieren</a><a href="aldi://portal">Portal</a></div>
+<div class="fuss" id="fuss"></div>
+<div class="tooltip" id="tooltip"></div>
+</div>
+<script>
+const d = ${daten};
+const de = (x, n) => x === null || x === undefined || isNaN(x) ? "–" : Number(x).toLocaleString("de-DE", { minimumFractionDigits: n, maximumFractionDigits: n });
+const gb = (x) => de(x, x >= 10 ? 1 : 2);
+const setze = (id, text) => { document.getElementById(id).textContent = text; };
+setze("tarif", d.tarif || "ALDI TALK");
+setze("nummer", (d.vertraege && d.vertraege[d.vertragIndex] ? d.vertraege[d.vertragIndex].label : "") + (d.name ? " · " + d.name : ""));
+const held = document.getElementById("held");
+held.textContent = d.unbegrenzt ? "∞ " : gb(d.left) + " ";
+const klein = document.createElement("small"); klein.textContent = d.unbegrenzt ? "unbegrenzt" : "GB frei von " + gb(d.total) + " GB"; held.appendChild(klein);
+const fuell = document.getElementById("fuellung");
+fuell.style.width = Math.round((d.pct || 0) * 100) + "%";
+const statusVar = { leer: "--critical", kritisch: "--critical", warnung: "--warning", gut: "--series-1" }[d.status] || "--series-1";
+fuell.style.background = "var(" + statusVar + ")";
+document.getElementById("punkt").style.background = "var(" + (d.status === "gut" ? "--good" : statusVar) + ")";
+setze("statustext", (d.status === "gut" ? "Alles im grünen Bereich" : d.statusText) + (d.stale ? " · ⚠︎ " + (d.hinweis || "nicht aktuell") : ""));
+const kpis = [
+  ["Guthaben", isNaN(d.guthaben) ? "–" : de(d.guthaben, 2) + " €", ""],
+  ["Laufzeit", d.resttageText, d.ablauf],
+  ["Tagesbudget", d.tagesbudget === null ? "–" : gb(d.tagesbudget) + " GB", "bis zum Laufzeitende"],
+  ["Prognose", !d.prognose ? "–" : d.prognose.proTag <= 0 ? "kein Verbrauch" : d.prognose.reicht ? "reicht ✓" : "⚠︎ leer am " + new Date(d.prognose.leerAm).toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" }),
+    !d.prognose ? "sammelt noch Daten" : "Ø " + gb(d.prognose.proTag) + " GB pro Tag"],
+];
+for (const [l, w, u] of kpis) {
+  const k = document.createElement("div"); k.className = "kpi";
+  for (const [cls, text] of [["l", l], ["w", w], ["u", u]]) { const e = document.createElement("div"); e.className = cls; e.textContent = text; k.appendChild(e); }
+  document.getElementById("kpis").appendChild(k);
+}
+// Säulendiagramm: eine Reihe, Säulen ≤ 24 px, oben 4 px rund, unten gerade, Tagesbudget als Haarlinie.
+const svg = document.getElementById("diagramm");
+const W = Math.round(svg.getBoundingClientRect().width) || 340, H = 170, links = 34, unten = 22, oben = 10;
+svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+const tage = d.tageVerbrauch || [];
+const maxWert = Math.max(d.tagesbudget || 0, ...tage.map(t => t.gb), 0.01);
+const schritt = (() => { const roh = maxWert / 3; const p = Math.pow(10, Math.floor(Math.log10(roh))); return [1, 2, 2.5, 5, 10].map(m => m * p).find(v => v >= roh); })();
+const yMax = Math.ceil(maxWert / schritt) * schritt;
+const y = v => oben + (H - unten - oben) * (1 - v / yMax);
+const ns = "http://www.w3.org/2000/svg";
+const el = (n, a) => { const e = document.createElementNS(ns, n); for (const k in a) e.setAttribute(k, a[k]); return e; };
+const style = getComputedStyle(document.querySelector(".viz-root"));
+const c = v => style.getPropertyValue(v).trim();
+for (let v = 0; v <= yMax + 1e-9; v += schritt) {
+  svg.appendChild(el("line", { x1: links, x2: W, y1: y(v), y2: y(v), stroke: v === 0 ? c("--baseline") : c("--grid"), "stroke-width": 1 }));
+  const t = el("text", { x: links - 6, y: y(v) + 4, "text-anchor": "end", "font-size": 10, fill: c("--muted") }); t.textContent = de(v, v < 1 && v > 0 ? 1 : 0); svg.appendChild(t);
+}
+const fach = (W - links) / Math.max(1, tage.length);
+const breite = Math.min(24, fach - 4);
+const tip = document.getElementById("tooltip");
+tage.forEach((t, i) => {
+  const x = links + i * fach + (fach - breite) / 2;
+  const h = Math.max(0, y(0) - y(t.gb));
+  if (h > 0) {
+    const r = Math.min(4, h, breite / 2);
+    const pfad = "M" + x + "," + y(0) + "V" + (y(0) - h + r) + "Q" + x + "," + (y(0) - h) + " " + (x + r) + "," + (y(0) - h) + "H" + (x + breite - r) + "Q" + (x + breite) + "," + (y(0) - h) + " " + (x + breite) + "," + (y(0) - h + r) + "V" + y(0) + "Z";
+    svg.appendChild(el("path", { d: pfad, fill: c("--series-1"), opacity: t.heute ? 1 : 0.55 }));
+  }
+  const tag = new Date(t.t);
+  if (i % 2 === (tage.length - 1) % 2) {
+    const lab = el("text", { x: links + i * fach + fach / 2, y: H - 6, "text-anchor": "middle", "font-size": 10, fill: c("--muted") });
+    lab.textContent = t.heute ? "heute" : ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"][tag.getDay()];
+    svg.appendChild(lab);
+  }
+  // Treffer-Fläche größer als die Säule (ganzes Fach), Tooltip bei Tippen/Zeigen
+  const treffer = el("rect", { x: links + i * fach, y: oben, width: fach, height: H - unten - oben, fill: "transparent", tabindex: 0 });
+  const zeige = (ev) => {
+    tip.replaceChildren();
+    const b = document.createElement("b"); b.textContent = gb(t.gb) + " GB";
+    const s = document.createElement("span"); s.textContent = tag.toLocaleDateString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit" });
+    tip.append(b, s); tip.style.display = "block";
+    const box = treffer.getBoundingClientRect();
+    tip.style.left = Math.min(window.innerWidth - 110, Math.max(6, box.left + box.width / 2 - 45)) + "px";
+    tip.style.top = (box.top + 4) + "px";
+  };
+  treffer.addEventListener("pointerdown", zeige); treffer.addEventListener("pointermove", zeige); treffer.addEventListener("focus", zeige);
+  treffer.addEventListener("pointerleave", () => tip.style.display = "none");
+  svg.appendChild(treffer);
+  const zeile = document.createElement("tr");
+  const a = document.createElement("td"); a.textContent = tag.toLocaleDateString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit" });
+  const b = document.createElement("td"); b.textContent = gb(t.gb) + " GB";
+  zeile.append(a, b); document.querySelector("#tabelle tbody").appendChild(zeile);
+});
+if (d.tagesbudget) {
+  svg.appendChild(el("line", { x1: links, x2: W, y1: y(d.tagesbudget), y2: y(d.tagesbudget), stroke: c("--text-secondary"), "stroke-width": 1 }));
+  const bl = el("text", { x: W - 2, y: y(d.tagesbudget) - 4, "text-anchor": "end", "font-size": 10, fill: c("--text-secondary"), stroke: c("--surface-1"), "stroke-width": 3, "paint-order": "stroke" });
+  bl.textContent = "Tagesbudget " + gb(d.tagesbudget) + " GB"; svg.appendChild(bl);
+}
+document.addEventListener("pointerdown", (e) => { if (!(e.target instanceof SVGRectElement)) tip.style.display = "none"; });
+const pakete = document.getElementById("pakete");
+for (const p of d.pakete || []) {
+  const z = document.createElement("div");
+  const n = document.createElement("span"); n.textContent = p.name;
+  const w = document.createElement("span"); w.textContent = p.unbegrenzt ? "unbegrenzt" : gb(p.left) + " / " + gb(p.total) + " GB";
+  z.append(n, w); pakete.appendChild(z);
+}
+for (const s of d.sonstige || []) {
+  const z = document.createElement("div");
+  const n = document.createElement("span"); n.textContent = s.typ;
+  const w = document.createElement("span"); w.textContent = s.unbegrenzt ? "Flat" : de(s.left, 0) + " von " + de(s.total, 0);
+  z.append(n, w); pakete.appendChild(z);
+}
+setze("fuss", "Aktualisiert " + d.aktualisiert + " · ALDI TALK Widget " + d.version);
+</script></body></html>`;
+}
+
+// ============================================================
+//  Menüs (beim Start in der App oder Antippen des kleinen Widgets)
+// ============================================================
+async function hauptmenue() {
+  // Zugangsdaten wurden abgelehnt: zuerst das klären.
+  if (loginSperreAktiv()) {
+    const a = new Alert();
+    a.title = "ALDI TALK";
+    a.message = "ALDI TALK hat die gespeicherten Zugangsdaten abgelehnt:\n\n" + loginSperreText() + "\n\nHast du dein Passwort geändert? Dann bitte neu eingeben.";
+    a.addAction("Zugangsdaten neu eingeben");
+    a.addAction("Nochmal mit den alten versuchen");
+    a.addCancelAction("Abbrechen");
+    const wahl = await a.presentAlert();
+    if (wahl === -1) return;
+    if (wahl === 0) vergissZugangsdaten();
+    hebeLoginSperreAuf();
+    forceRefresh();
+  }
+
+  const d = await holeDaten();
+  const m = new Alert();
+  m.title = "ALDI TALK";
+  m.message = d.error ? "⚠︎ " + d.error
+    : `${d.unbegrenzt ? "Unbegrenztes Datenvolumen" : fmtGB(d.left) + " von " + fmtGB(d.total) + " GB frei"}`
+      + (isNaN(d.guthaben) ? "" : ` · Guthaben ${fmtEuro(d.guthaben)}`)
+      + (d.resttage !== null && d.resttage !== undefined ? ` · noch ${d.resttage} Tage` : "")
+      + (d.hinweis ? "\n⚠︎ " + d.hinweis : "");
+  const aktionen = [
+    ["📊 Übersicht", async () => zeigeDashboard(d.error ? await holeDaten({ erzwingen: true }) : d)],
+    ["↻ Jetzt aktualisieren", async () => zeigeDashboard(await holeDaten({ erzwingen: true }))],
+    ["＋ Datenvolumen nachbuchen", async () => Safari.openInApp(BOOKING, false)],
+    ["🌐 Kundenportal öffnen", async () => Safari.openInApp(OVERVIEW, false)],
+    ["🖼 Widget-Vorschau", async () => vorschauMenue(d)],
+    ["⚙️ Einstellungen", async () => einstellungsMenue(d)],
+    ["🔑 Zugangsdaten ändern", async () => {
+      vergissZugangsdaten(); hebeLoginSperreAuf(); forceRefresh();
+      await zeigeDashboard(await holeDaten({ erzwingen: true }));
+    }],
+  ];
+  for (const [text] of aktionen) m.addAction(text);
+  m.addCancelAction("Fertig");
+  const wahl = await m.presentSheet();
+  if (wahl >= 0) await aktionen[wahl][1]();
+}
+
+async function vorschauMenue(d) {
+  const a = new Alert();
+  a.title = "Widget-Vorschau";
+  const groessen = [["Klein", "small"], ["Mittel", "medium"], ["Groß", "large"], ["Sperrbildschirm rund", "accessoryCircular"], ["Sperrbildschirm rechteckig", "accessoryRectangular"]];
+  for (const [n] of groessen) a.addAction(n);
+  a.addCancelAction("Zurück");
+  const wahl = await a.presentSheet();
+  if (wahl < 0) return;
+  const familie = groessen[wahl][1];
+  const w = baueWidget(d, familie);
+  if (familie === "small") await w.presentSmall();
+  else if (familie === "medium") await w.presentMedium();
+  else if (familie === "large") await w.presentLarge();
+  else if (familie === "accessoryCircular" && w.presentAccessoryCircular) await w.presentAccessoryCircular();
+  else if (w.presentAccessoryRectangular) await w.presentAccessoryRectangular();
+}
+
+async function einstellungsMenue(d) {
+  while (true) {
+    const a = new Alert();
+    a.title = "Einstellungen";
+    a.message = `ALDI TALK Widget ${VERSION}`;
+    const designNamen = { aldi: "ALDI-Blau", dunkel: "Dunkel", hell: "Hell", auto: "Automatisch (hell/dunkel)" };
+    const punkte = [
+      [`Design: ${designNamen[einstellungen.design]}`, "design"],
+      [`Volumen-Warnung ab: ${fmtGB(einstellungen.warnGB)} GB`, "warnGB"],
+      [`Guthaben-Warnung unter: ${fmtEuro(einstellungen.warnGuthaben)}`, "warnGuthaben"],
+      [`Mitteilungen: ${einstellungen.mitteilungen ? "an" : "aus"}`, "mitteilungen"],
+      [`Aktualisieren alle: ${einstellungen.cacheMin} Min`, "cacheMin"],
+    ];
+    if (d && d.vertraege && d.vertraege.length > 1) punkte.push([`Vertrag: ${d.vertraege[Math.min(einstellungen.vertrag, d.vertraege.length - 1)].label}`, "vertrag"]);
+    punkte.push(["Verbrauchsverlauf löschen", "verlauf"]);
+    for (const [t] of punkte) a.addAction(t);
+    a.addDestructiveAction("Alles zurücksetzen (inkl. Zugangsdaten)");
+    a.addCancelAction("Fertig");
+    const wahl = await a.presentSheet();
+    if (wahl === -1) return;
+    if (wahl === punkte.length) {
+      if (await bestaetige("Alles zurücksetzen?", "Zugangsdaten, Einstellungen, Verlauf und zwischengespeicherte Daten werden gelöscht.")) {
+        vergissZugangsdaten();
+        for (const n of fm.listContents(ORDNER).filter((n) => n.startsWith("alditalk-"))) loesche(n);
+        Object.assign(einstellungen, STANDARD);
+        return;
+      }
+      continue;
+    }
+    const was = punkte[wahl][1];
+    if (was === "design") {
+      const keys = Object.keys(designNamen);
+      const w = await auswahl("Design", keys.map((k) => designNamen[k]));
+      if (w >= 0) einstellungen.design = keys[w];
+    } else if (was === "warnGB") {
+      const v = await zahlEingabe("Volumen-Warnung", "Ab wie vielen GB Restvolumen warnen?", einstellungen.warnGB);
+      if (v !== null) einstellungen.warnGB = Math.max(0, v);
+    } else if (was === "warnGuthaben") {
+      const v = await zahlEingabe("Guthaben-Warnung", "Warnen, wenn kurz vor der Verlängerung weniger Guthaben da ist als (€):", einstellungen.warnGuthaben);
+      if (v !== null) einstellungen.warnGuthaben = Math.max(0, v);
+    } else if (was === "mitteilungen") {
+      einstellungen.mitteilungen = !einstellungen.mitteilungen;
+    } else if (was === "cacheMin") {
+      const optionen = [15, 30, 60, 120];
+      const w = await auswahl("Aktualisieren alle …", optionen.map((o) => o + " Minuten"));
+      if (w >= 0) einstellungen.cacheMin = optionen[w];
+    } else if (was === "vertrag") {
+      const w = await auswahl("Vertrag", d.vertraege.map((v) => v.label));
+      if (w >= 0) { einstellungen.vertrag = w; vertragIndex = w; }
+    } else if (was === "verlauf") {
+      if (await bestaetige("Verlauf löschen?", "Der Verbrauch der letzten Tage und die Prognose beginnen neu.")) loesche(verlaufName());
+    }
+    speichereEinstellungen();
+  }
+}
+
+async function auswahl(titel, optionen) {
+  const a = new Alert();
+  a.title = titel;
+  for (const o of optionen) a.addAction(o);
+  a.addCancelAction("Abbrechen");
+  return a.presentSheet();
+}
+
+async function zahlEingabe(titel, text, wert) {
+  const a = new Alert();
+  a.title = titel;
+  a.message = text;
+  const f = a.addTextField("", String(wert).replace(".", ","));
+  f.setDecimalPadKeyboard();
+  a.addAction("Speichern");
+  a.addCancelAction("Abbrechen");
+  if ((await a.presentAlert()) === -1) return null;
+  const v = parseFloat(a.textFieldValue(0).replace(",", "."));
+  return isNaN(v) ? null : v;
+}
+
+async function bestaetige(titel, text) {
+  const a = new Alert();
+  a.title = titel;
+  a.message = text;
+  a.addDestructiveAction("Ja");
+  a.addCancelAction("Nein");
+  return (await a.presentAlert()) === 0;
 }
 
 // ============================================================
 //  Formatierung
 // ============================================================
-function fmtGB(v) {
+function fmtGB(v, kurz) {
   if (v === null || v === undefined || isNaN(v)) return "–";
-  if (v >= 10) return v.toFixed(1).replace(".", ",");
-  return v.toFixed(2).replace(".", ",");
+  if (v === Infinity) return "∞";
+  const x = Math.max(0, v);
+  if (kurz || x >= 10) return x.toFixed(x >= 100 ? 0 : 1).replace(".", ",");
+  return x.toFixed(2).replace(".", ",");
 }
 
-function fmtExpiry(s) {
-  if (!s) return "–";
-  const d = new Date(String(s).replace(" ", "T"));
-  if (isNaN(d.getTime())) return "–";
-  const days = Math.ceil((d - new Date()) / 86400000);
-  const df = new DateFormatter();
-  df.dateFormat = "dd.MM.";
-  return df.string(d) + (days >= 0 ? " (" + days + " T)" : "");
+function fmtEuro(v) {
+  if (v === null || v === undefined || isNaN(v)) return "–";
+  return v.toFixed(2).replace(".", ",") + " €";
 }
 
-function fmtDays(s) {
-  if (!s) return "";
-  const d = new Date(String(s).replace(" ", "T"));
-  if (isNaN(d.getTime())) return "";
-  const days = Math.ceil((d - new Date()) / 86400000);
-  return days >= 0 ? "noch " + days + " T" : "abgelaufen";
+/** Akzeptiert "2026-10-12", "2026-10-12 23:59:59", ISO mit Zeitzone und "12.10.2026". */
+function parseDatum(s) {
+  if (!s) return null;
+  const text = String(s).trim();
+  const deutsch = text.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+  const d = deutsch
+    ? new Date(parseInt(deutsch[3], 10), parseInt(deutsch[2], 10) - 1, parseInt(deutsch[1], 10), 23, 59, 59)
+    : new Date(text.length === 10 ? text + "T23:59:59" : text.replace(" ", "T"));
+  return isNaN(d.getTime()) ? null : d;
 }
 
-function fmtTime(ts) {
+function resttage(s) {
+  const d = parseDatum(s);
+  if (!d) return null;
+  return Math.max(0, Math.ceil((d.getTime() - Date.now()) / 86400000));
+}
+
+function fmtDatum(ts) {
+  const d = new Date(ts);
+  return String(d.getDate()).padStart(2, "0") + "." + String(d.getMonth() + 1).padStart(2, "0") + ".";
+}
+
+function fmtAblauf(s, mitTagen = true) {
+  const d = parseDatum(s);
+  if (!d) return "–";
+  const tage = resttage(s);
+  return fmtDatum(d.getTime()) + (mitTagen && tage !== null ? ` (${tage} T)` : "");
+}
+
+function fmtRelativ(ts) {
   if (!ts) return "–";
-  const df = new DateFormatter();
-  df.useNoDateStyle();
-  df.useShortTimeStyle();
-  return df.string(new Date(ts));
+  const min = Math.round((Date.now() - ts) / 60000);
+  if (min < 1) return "gerade eben";
+  if (min < 60) return `vor ${min} Min`;
+  const std = Math.round(min / 60);
+  if (std < 24) return `vor ${std} Std`;
+  return "am " + fmtDatum(ts);
 }
+
+// ============================================================
+//  Einstieg (am Ende der Datei: alle Funktionen und Konstanten sind dann bereit)
+// ============================================================
+const param = (args.queryParameters && args.queryParameters.param) || "";
+
+if (param === "book") {
+  // Nachbuchen in der Buchungsübersicht (Safari-Sitzung – dort meist schon angemeldet).
+  Safari.openInApp(BOOKING, false);
+} else if (param === "portal") {
+  Safari.openInApp(OVERVIEW, false);
+} else if (param === "refresh") {
+  const daten = await holeDaten({ erzwingen: true });
+  await zeigeDashboard(daten);
+} else if (param === "dashboard") {
+  await zeigeDashboard(await holeDaten());
+} else if (param === "menu") {
+  await hauptmenue();
+} else if (config.runsInWidget || config.runsInAccessoryWidget) {
+  const familie = config.widgetFamily || "small";
+  const daten = await holeDaten();
+  await pruefeWarnungen(daten);
+  const widget = baueWidget(daten, familie);
+  Script.setWidget(widget);
+} else {
+  await hauptmenue();
+}
+Script.complete();
