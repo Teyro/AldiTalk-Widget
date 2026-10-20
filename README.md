@@ -19,6 +19,11 @@ auf dem Home- und Sperrbildschirm und als ausführliche Übersicht in der App.
 - **Knöpfe im Widget:** Nachbuchen und Aktualisieren direkt im mittleren und großen Widget.
 - **Designs:** ALDI-Blau, Dunkel, Hell oder Automatisch – pro Widget wählbar.
 - **Mehrere Rufnummern** im selben Kundenkonto.
+- **Roaming:** Einmal am Tag prüft das Widget per Standort, in welchem Land du bist. Im
+  Ausland zeigt es mit Landesflagge (z. B. „🇪🇸 Roaming“) das Roaming-Volumen, sofern
+  ALDI TALK ein eigenes ausweist – sonst das normale Volumen mit Hinweis, außerhalb der
+  EU mit Kosten-Warnung. Beim Wechsel in ein anderes Land kommt einmal eine Mitteilung.
+  In den Einstellungen umschaltbar: Automatisch, Immer Roaming oder Aus.
 
 ## Einrichten
 
@@ -32,14 +37,21 @@ auf dem Home- und Sperrbildschirm und als ausführliche Übersicht in der App.
 
 **Widget-Parameter** (optional, beim Bearbeiten des Widgets):
 `2` = zweite Rufnummer des Kontos · `hell` / `dunkel` / `aldi` / `auto` = Design für
-dieses Widget · `2, hell` = beides.
+dieses Widget · `roaming` / `inland` = dieses Widget zeigt immer Roaming- bzw.
+Inlandsvolumen · `2, hell` = beides.
+
+**Standort:** Für die automatische Roaming-Erkennung fragt iOS beim ersten Start nach
+dem Standort. Dafür in *Einstellungen → Datenschutz → Ortungsdienste → Scriptable*
+„Beim Verwenden der App oder Widgets“ wählen. Geprüft wird nur grob (auf ca. 3 km) und
+höchstens einmal am Tag; gespeichert wird nur das Land.
 
 ## In der App
 
 Startest du das Skript in Scriptable (oder tippst auf das kleine Widget), erscheint ein
 Menü: Übersicht, Aktualisieren, Nachbuchen, Kundenportal, Widget-Vorschau,
 **Einstellungen** (Design, Warnschwellen für Volumen und Guthaben, Mitteilungen,
-Aktualisierungsintervall, Rufnummer, Verlauf löschen, alles zurücksetzen) und
+Aktualisierungsintervall, Roaming, Standort jetzt prüfen, Rufnummer, Verlauf löschen,
+alles zurücksetzen) und
 Zugangsdaten ändern.
 
 ## Wenn „Zugangsdaten abgelehnt“ erscheint
@@ -56,3 +68,6 @@ das Skript einmal in der App öffnen und „Zugangsdaten neu eingeben“ wählen
 - Der Tagesverbrauch ist eine Schätzung aus den Abfragen des Widgets (standardmäßig alle
   30 Minuten). Fragt das iPhone länger nicht ab, landet der Verbrauch beim nächsten Tag
   mit Abfrage.
+- Wie ALDI TALK Roaming-Pakete im Portal kennzeichnet, ist nicht offiziell dokumentiert.
+  Das Widget erkennt sie an Feldern bzw. am Namen („EU-Roaming“, „Ausland“, „World“ …).
+  Wird keins erkannt, gilt im EU-Ausland das normale Volumen.

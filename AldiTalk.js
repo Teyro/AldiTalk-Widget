@@ -10,6 +10,9 @@
 //  Verbrauch der letzten 14 Tage und eine Prognose, ob das Volumen reicht.
 //  Warnt per Mitteilung, wenn das Volumen knapp oder das Guthaben vor der
 //  Verlängerung zu niedrig ist.
+//  Roaming: Einmal am Tag prüft das Widget, in welchem Land du bist. Im Ausland
+//  zeigt es das Roaming-Volumen (falls ALDI TALK eins ausweist), sonst das
+//  normale Volumen mit Hinweis. In den Einstellungen auch fest an/aus.
 //
 //  Einrichten:
 //  1. Skript in Scriptable anlegen und GENAU so benennen wie SCRIPT_NAME.
@@ -20,13 +23,14 @@
 //    "2"       -> zweiter Vertrag des Kontos (bei mehreren Rufnummern)
 //    "hell"    -> Design für dieses Widget (aldi, dunkel, hell, auto)
 //    "2, hell" -> beides
+//    "roaming" / "inland" -> dieses Widget zeigt immer Roaming- bzw. Inlandsvolumen
 //
 //  Lehnt ALDI TALK die Zugangsdaten ab, probiert das Widget NICHT weiter
 //  (sonst sperrt ALDI TALK das Konto) – einmal das Skript in der App öffnen.
 // ============================================================
 
 const SCRIPT_NAME = "AldiTalk";
-const VERSION = "2.0";
+const VERSION = "2.1";
 
 // --- Endpunkte (Stand: Kundenportal 2026) ---------------------
 const PORTAL = "https://www.alditalk-kundenportal.de";
@@ -60,6 +64,7 @@ const STANDARD = {
   mitteilungen: true,
   cacheMin: 30,              // so oft wird wirklich neu eingeloggt
   vertrag: 0,                // welcher Vertrag (bei mehreren Rufnummern)
+  roaming: "auto",           // auto (Standort täglich prüfen) | an | aus
 };
 
 const fm = FileManager.local();
@@ -83,9 +88,12 @@ function speichereEinstellungen() { schreibJSON("alditalk-einstellungen.json", e
 const widgetParam = String(args.widgetParameter || "").toLowerCase().split(/[,; ]+/).filter(Boolean);
 let vertragIndex = einstellungen.vertrag;
 let designWahl = einstellungen.design;
+let roamingWahl = einstellungen.roaming;
 for (const teil of widgetParam) {
   if (/^\d+$/.test(teil)) vertragIndex = Math.max(0, parseInt(teil, 10) - 1);
   else if (["aldi", "dunkel", "hell", "auto"].includes(teil)) designWahl = teil;
+  else if (teil === "roaming") roamingWahl = "an";
+  else if (teil === "inland") roamingWahl = "aus";
 }
 
 // ============================================================
@@ -174,10 +182,96 @@ const setzeLoginSperre = (text) => schreibJSON(SPERRE, { text, ts: Date.now() })
 const hebeLoginSperreAuf = () => loesche(SPERRE);
 
 // ============================================================
+//  Standort (einmal am Tag) und Roaming
+// ============================================================
+const STANDORT = "alditalk-standort.json";
+const HEIMATLAND = "DE";
+// EU + EWR (dort gilt EU-Roaming) inkl. Überseegebiete, die eigene Ländercodes haben.
+const EU_LAENDER = ["AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "GR", "HU", "IE", "IT", "LV", "LT",
+  "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE", "IS", "LI", "NO", "AX", "GP", "MQ", "GF", "RE", "YT", "MF"];
+
+let standort = liesJSON(STANDORT, null);
+
+/** Land per Standort bestimmen – höchstens einmal am Tag (nach Fehlschlag frühestens nach 1 Stunde neu). */
+async function pruefeStandort({ erzwingen = false } = {}) {
+  const heute = tagSchluessel(Date.now());
+  if (!erzwingen && standort && standort.tag === heute) return standort;
+  if (!erzwingen && standort && standort.fehlTs && Date.now() - standort.fehlTs < 3600 * 1000) return standort;
+  try {
+    Location.setAccuracyToThreeKilometers(); // grob reicht – schneller und spart Akku
+    const pos = await mitZeitlimit(Location.current(), 8000);
+    const orte = await mitZeitlimit(Location.reverseGeocode(pos.latitude, pos.longitude, "de"), 6000);
+    const ort = (orte && orte[0]) || {};
+    const land = String(ort.isoCountryCode || "").toUpperCase();
+    if (!land) throw new Error("Land nicht erkannt");
+    standort = { tag: heute, land, name: ort.country || land, ts: Date.now() };
+  } catch (e) {
+    console.error("Standort: " + (e.message || e));
+    // Letztes bekanntes Land behalten.
+    standort = Object.assign({}, standort || {}, { fehlTs: Date.now(), fehler: String(e.message || e).slice(0, 100) });
+  }
+  schreibJSON(STANDORT, standort);
+  return standort;
+}
+
+function mitZeitlimit(versprechen, ms) {
+  return new Promise((ok, fehler) => {
+    const t = Timer.schedule(ms, false, () => fehler(new Error("Zeitüberschreitung")));
+    versprechen.then((w) => { t.invalidate(); ok(w); }, (e) => { t.invalidate(); fehler(e); });
+  });
+}
+
+/** Ob gerade Roaming gezeigt wird – aus Einstellung bzw. Widget-Parameter und Standort. */
+function roamingLage() {
+  const imAusland = !!(standort && standort.land && standort.land !== HEIMATLAND);
+  if (roamingWahl === "aus") return { aktiv: false };
+  if (roamingWahl === "an") {
+    return { aktiv: true, manuell: true, land: imAusland ? standort.land : null,
+      landName: imAusland ? standort.name : "", eu: imAusland ? EU_LAENDER.includes(standort.land) : true };
+  }
+  if (!imAusland) return { aktiv: false };
+  return { aktiv: true, land: standort.land, landName: standort.name, eu: EU_LAENDER.includes(standort.land) };
+}
+
+/** Flaggen-Emoji aus dem Ländercode ("ES" -> 🇪🇸). */
+function flagge(land) {
+  if (!/^[A-Z]{2}$/.test(land || "")) return "🌍";
+  return String.fromCodePoint(...[...land].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65));
+}
+
+/**
+ * Ist ein Datenpaket ein Roaming-Paket? Die Feldnamen sind geraten (kein Testkonto):
+ * erst eindeutige Felder, dann der Name ("EU-Roaming", "Ausland", "World" …).
+ * "inkl. EU-Roaming" im Tarifnamen zählt NICHT als Roaming-Paket.
+ */
+function istRoamingPaket(p) {
+  if (p.roaming === true || p.isRoaming === true || p.roamingPack === true) return true;
+  const zone = String(p.zone || p.region || p.area || p.usageArea || "").toLowerCase();
+  if (zone && /roaming|eu|ausland|international|world|abroad/.test(zone)) return true;
+  if (/roaming/.test(String(p.type || "").toLowerCase())) return true;
+  const text = [p.name, p.packName, p.description].filter(Boolean).join(" ");
+  if (/inkl|inklusive|incl/i.test(text)) return false;
+  return /roaming|ausland|international|world|weltweit/i.test(text) || /(^|[^a-zäöü])eu([^a-zäöü]|$)/i.test(text);
+}
+
+/** Datenpakete zu einem Wert zusammenfassen (Ablauf: das des größten Pakets). */
+function summiere(pakete) {
+  if (!pakete.length) return null;
+  const unbegrenzt = pakete.some((p) => p.unbegrenzt);
+  const haupt = pakete.slice().sort((a, b) => b.total - a.total)[0];
+  return {
+    left: unbegrenzt ? Infinity : pakete.reduce((s, p) => s + p.left, 0),
+    total: unbegrenzt ? Infinity : pakete.reduce((s, p) => s + p.total, 0),
+    unbegrenzt,
+    expires: haupt.expires,
+  };
+}
+
+// ============================================================
 //  Daten holen (mit Cache je Vertrag)
 // ============================================================
 const cacheName = () => `alditalk-cache-${vertragIndex}.json`;
-const verlaufName = () => `alditalk-verlauf-${vertragIndex}.json`;
+const verlaufName = (ansicht) => `alditalk-verlauf-${vertragIndex}${ansicht === "roaming" ? "-roaming" : ""}.json`;
 
 function forceRefresh() { loesche(cacheName()); }
 
@@ -203,7 +297,8 @@ async function holeDaten({ erzwingen = false } = {}) {
     live.ts = Date.now();
     schreibJSON(cacheName(), live);
     hebeLoginSperreAuf();
-    merkeVerlauf(live);
+    merkeVerlauf(live, "inland");
+    if (live.roaming) merkeVerlauf(live.roaming, "roaming");
     return ergaenze({ ...live, stale: false });
   } catch (e) {
     console.error(e);
@@ -214,16 +309,29 @@ async function holeDaten({ erzwingen = false } = {}) {
   }
 }
 
-/** Abgeleitete Werte: Status, Resttage, Tagesbudget, Verbrauch, Prognose. */
+/** Abgeleitete Werte: Roaming-Ansicht, Status, Resttage, Tagesbudget, Verbrauch, Prognose. */
 function ergaenze(d) {
   if (d.error) return d;
+  const lage = roamingLage();
+  d.ansicht = "inland";
+  d.roamingLage = lage;
+  if (lage.aktiv) {
+    d.inland = { left: d.left, total: d.total, unbegrenzt: d.unbegrenzt, expires: d.expires };
+    if (d.roaming) {
+      Object.assign(d, d.roaming);
+      d.ansicht = "roaming";
+    }
+    d.roamingHinweis = d.roaming
+      ? (lage.eu ? "" : "Außerhalb der EU – Datennutzung kann extra kosten")
+      : (lage.eu ? "Im EU-Ausland gilt dein normales Volumen" : "Außerhalb der EU – Datennutzung kann extra kosten");
+  }
   const tage = resttage(d.expires);
   d.resttage = tage;
   d.pct = d.unbegrenzt ? 1 : (d.total > 0 ? Math.max(0, Math.min(1, d.left / d.total)) : 0);
   d.status = d.unbegrenzt ? "gut"
     : (d.left <= 0 ? "leer" : d.left <= einstellungen.warnGB ? "kritisch" : d.pct < 0.33 ? "warnung" : "gut");
   d.tagesbudget = (!d.unbegrenzt && tage !== null && tage > 0) ? Math.max(0, d.left) / tage : null;
-  const verlauf = liesJSON(verlaufName(), []);
+  const verlauf = liesJSON(verlaufName(d.ansicht), []);
   d.tageVerbrauch = tagesVerbrauch(verlauf, 14);
   d.prognose = d.unbegrenzt ? null : prognose(verlauf, d);
   return d;
@@ -265,7 +373,7 @@ async function fetchLive(creds) {
       const allocated = parseFloat(p.allocated);
       const used = parseFloat(p.used);
       if (isNaN(allocated) || isNaN(used)) continue;
-      if (typ === "data") {
+      if (/data|daten/.test(typ)) {
         const div = UNIT_TO_GB[String(p.unit || "kilobytes").toLowerCase()] || UNIT_TO_GB.kilobytes;
         const total = allocated / div;
         pakete.push({
@@ -274,6 +382,7 @@ async function fetchLive(creds) {
           left: (allocated - used) / div,
           expires: p.nextExpirationDate || p.expirationDate || "",
           unbegrenzt: p.unlimited === true || allocated < 0 || total >= 10000,
+          roaming: istRoamingPaket(p),
         });
       } else if (typ === "voice" || typ === "sms" || typ === "minutes") {
         sonstige.push({
@@ -287,18 +396,21 @@ async function fetchLive(creds) {
   }
   if (!pakete.length) throw new Error("Kein Datenpaket gefunden");
 
-  // Alle Datenpakete zusammen (Tarif + nachgebuchte Pakete). Ablaufdatum: das des
-  // Hauptpakets (größtes Paket), Zusatzpakete können früher ablaufen.
-  const unbegrenzt = pakete.some((p) => p.unbegrenzt);
-  const haupt = pakete.slice().sort((a, b) => b.total - a.total)[0];
+  // Alle Datenpakete zusammen (Tarif + nachgebuchte Pakete), Roaming-Pakete getrennt.
+  // Sieht ALLES nach Roaming aus, war die Erkennung wohl falsch – dann zählt alles als Inland.
+  let inlandPakete = pakete.filter((p) => !p.roaming);
+  let roamingPakete = pakete.filter((p) => p.roaming);
+  if (!inlandPakete.length) {
+    pakete.forEach((p) => { p.roaming = false; });
+    inlandPakete = pakete;
+    roamingPakete = [];
+  }
   return {
     name: details.firstName || "",
     tarif,
     guthaben: parseFloat(offers.totalBalance),
-    left: unbegrenzt ? Infinity : pakete.reduce((s, p) => s + p.left, 0),
-    total: unbegrenzt ? Infinity : pakete.reduce((s, p) => s + p.total, 0),
-    unbegrenzt,
-    expires: haupt.expires,
+    ...summiere(inlandPakete),
+    roaming: summiere(roamingPakete),
     pakete: pakete.map((p) => ({ ...p, left: p.unbegrenzt ? null : p.left, total: p.unbegrenzt ? null : p.total })),
     sonstige,
     vertraege,
@@ -492,16 +604,16 @@ function sha1(str) {
 // ============================================================
 //  Verlauf, Tagesverbrauch, Prognose
 // ============================================================
-function merkeVerlauf(d) {
+function merkeVerlauf(d, ansicht) {
   if (d.unbegrenzt) return;
-  const verlauf = liesJSON(verlaufName(), []);
+  const verlauf = liesJSON(verlaufName(ansicht), []);
   const letzter = verlauf[verlauf.length - 1];
   const jetzt = Date.now();
   // Nur speichern, wenn sich etwas geändert hat oder eine Stunde vergangen ist.
   if (letzter && Math.abs(letzter.left - d.left) < 0.0005 && jetzt - letzter.t < 3600 * 1000) return;
   verlauf.push({ t: jetzt, left: d.left, total: d.total });
   const grenze = jetzt - VERLAUF_TAGE * 86400000;
-  schreibJSON(verlaufName(), verlauf.filter((e) => e.t >= grenze));
+  schreibJSON(verlaufName(ansicht), verlauf.filter((e) => e.t >= grenze));
 }
 
 function tagSchluessel(t) {
@@ -558,7 +670,7 @@ function prognose(verlauf, d) {
 async function pruefeWarnungen(d) {
   if (!einstellungen.mitteilungen || d.error || d.stale) return;
   const zustand = liesJSON("alditalk-mitteilungen.json", {});
-  const zeitraum = d.expires || "ohne";
+  const zeitraum = (d.ansicht === "roaming" ? "roaming-" : "") + (d.expires || "ohne");
   const schicke = async (id, titel, text) => {
     try {
       const n = new Notification();
@@ -570,15 +682,29 @@ async function pruefeWarnungen(d) {
       await n.schedule();
     } catch (e) { console.error(e); }
   };
+  // Neues Land (laut Standort): einmal sagen, was dort gilt.
+  const lage = d.roamingLage || {};
+  const land = lage.land || (lage.aktiv ? null : HEIMATLAND);
+  if (land && zustand.land && zustand.land !== land && land !== HEIMATLAND) {
+    const volumen = d.unbegrenzt ? "Unbegrenztes Datenvolumen"
+      : `${fmtGB(d.left)} GB ${d.ansicht === "roaming" ? "Roaming-Volumen" : "Datenvolumen"} frei`;
+    await schicke("land", `ALDI TALK: ${flagge(land)} ${lage.landName || land}`,
+      lage.eu ? `EU-Roaming: ${volumen}.` : `Außerhalb der EU – mobiles Surfen kann extra kosten. ${volumen}.`);
+  }
+  if (land) zustand.land = land;
+  const art = d.ansicht === "roaming" ? "Roaming-Volumen" : "Datenvolumen";
   if (!d.unbegrenzt && d.left <= einstellungen.warnGB && zustand.volumen !== zeitraum) {
     zustand.volumen = zeitraum;
-    await schicke("volumen", "ALDI TALK: Datenvolumen fast aufgebraucht",
+    await schicke("volumen", `ALDI TALK: ${art} fast aufgebraucht`,
       `Nur noch ${fmtGB(d.left)} GB frei` + (d.resttage !== null ? ` – noch ${d.resttage} Tage Laufzeit.` : "."));
   }
-  if (d.resttage !== null && d.resttage <= 3 && !isNaN(d.guthaben) && d.guthaben < einstellungen.warnGuthaben && zustand.guthaben !== zeitraum) {
-    zustand.guthaben = zeitraum;
+  // Verlängerung richtet sich nach dem Tarif, nicht nach einem Roaming-Paket.
+  const vertragTage = d.inland ? resttage(d.inland.expires) : d.resttage;
+  const vertragZeitraum = (d.inland ? d.inland.expires : d.expires) || "ohne";
+  if (vertragTage !== null && vertragTage <= 3 && !isNaN(d.guthaben) && d.guthaben < einstellungen.warnGuthaben && zustand.guthaben !== vertragZeitraum) {
+    zustand.guthaben = vertragZeitraum;
     await schicke("guthaben", "ALDI TALK: Guthaben aufladen",
-      `Verlängerung in ${d.resttage} Tag${d.resttage === 1 ? "" : "en"}, Guthaben nur ${fmtEuro(d.guthaben)}.`);
+      `Verlängerung in ${vertragTage} Tag${vertragTage === 1 ? "" : "en"}, Guthaben nur ${fmtEuro(d.guthaben)}.`);
   }
   if (d.prognose && !d.prognose.reicht && zustand.prognose !== zeitraum && d.status === "gut") {
     zustand.prognose = zeitraum;
@@ -627,6 +753,13 @@ function statusFarbe(d, D) {
   if (d.status === "leer" || d.status === "kritisch") return farbe(D.dunkel ? STATUS.kritischDunkel : STATUS.kritisch);
   if (d.status === "warnung") return farbe(STATUS.warnung);
   return farbe(D.akzent);
+}
+
+/** Titel im Ausland ("🇪🇸 Roaming"), sonst null. */
+function auslandTitel(d) {
+  const lage = d.roamingLage;
+  if (!lage || !lage.aktiv) return null;
+  return `${flagge(lage.land)} ${d.ansicht === "roaming" ? "Roaming" : lage.eu ? "EU-Ausland" : "Ausland"}`;
 }
 
 function statusText(d) {
@@ -679,13 +812,14 @@ function kopf(stack, D, titel, rechts) {
 function fussZeile(stack, d, D) {
   const f = stack.addStack();
   f.centerAlignContent();
-  const sym = f.addImage(sfBild(d.stale ? "exclamationmark.arrow.circlepath" : "checkmark.circle.fill"));
+  const roaming = !d.hinweis && d.roamingHinweis;
+  const sym = f.addImage(sfBild(roaming ? "globe" : d.stale ? "exclamationmark.arrow.circlepath" : "checkmark.circle.fill"));
   sym.imageSize = new Size(9, 9);
-  sym.tintColor = d.stale ? farbe(STATUS.warnung) : farbe(D.text3);
+  sym.tintColor = d.stale || roaming ? farbe(STATUS.warnung) : farbe(D.text3);
   f.addSpacer(3);
-  const t = f.addText(d.hinweis ? d.hinweis : (d.stale ? "Stand " : "Aktualisiert ") + fmtRelativ(d.ts));
+  const t = f.addText(d.hinweis || d.roamingHinweis || (d.stale ? "Stand " : "Aktualisiert ") + fmtRelativ(d.ts));
   t.font = Font.systemFont(9);
-  t.textColor = d.hinweis ? farbe(STATUS.warnung) : farbe(D.text3);
+  t.textColor = d.hinweis || roaming ? farbe(STATUS.warnung) : farbe(D.text3);
   t.lineLimit = 1;
   t.minimumScaleFactor = 0.7;
   return f;
@@ -695,7 +829,7 @@ function fussZeile(stack, d, D) {
 function klein(w, d, D) {
   w.setPadding(12, 12, 10, 12);
   w.url = skriptURL("menu");
-  kopf(w, D, "ALDI TALK", isNaN(d.guthaben) ? "" : fmtEuro(d.guthaben));
+  kopf(w, D, auslandTitel(d) || "ALDI TALK", isNaN(d.guthaben) ? "" : fmtEuro(d.guthaben));
   w.addSpacer();
   const reihe = w.addStack();
   reihe.addSpacer();
@@ -729,7 +863,7 @@ function mittel(w, d, D) {
 
   const rechts = reihe.addStack();
   rechts.layoutVertically();
-  kopf(rechts, D, d.tarif || "ALDI TALK");
+  kopf(rechts, D, auslandTitel(d) || d.tarif || "ALDI TALK");
   rechts.addSpacer(6);
   zeile(rechts, D, "creditcard.fill", "Guthaben", isNaN(d.guthaben) ? "–" : fmtEuro(d.guthaben));
   zeile(rechts, D, "calendar", "gültig bis", fmtAblauf(d.expires));
@@ -788,7 +922,7 @@ function pille(stack, D, symbol, text, url, haupt) {
 function gross(w, d, D) {
   w.setPadding(16, 16, 12, 16);
   w.url = skriptURL("dashboard");
-  kopf(w, D, d.tarif || "ALDI TALK", d.name ? "Hallo " + d.name : "");
+  kopf(w, D, auslandTitel(d) || d.tarif || "ALDI TALK", d.name ? "Hallo " + d.name : "");
   w.addSpacer(10);
 
   const oben = w.addStack();
@@ -829,7 +963,9 @@ function gross(w, d, D) {
 
   if (d.pakete && d.pakete.length > 1) {
     w.addSpacer(8);
-    for (const p of d.pakete.slice(0, 2)) paketZeile(w, p, D);
+    // Im Ausland die Roaming-Pakete zuerst.
+    const liste = d.ansicht === "roaming" ? [...d.pakete.filter((p) => p.roaming), ...d.pakete.filter((p) => !p.roaming)] : d.pakete;
+    for (const p of liste.slice(0, 2)) paketZeile(w, p, D);
   }
 
   w.addSpacer();
@@ -868,7 +1004,7 @@ function kachel(stack, D, label, wert, unter, wertFarbe) {
 function paketZeile(stack, p, D) {
   const z = stack.addStack();
   z.centerAlignContent();
-  const n = z.addText(p.name);
+  const n = z.addText((p.roaming ? "🌍 " : "") + p.name);
   n.font = Font.systemFont(10);
   n.textColor = farbe(D.text2);
   n.lineLimit = 1;
@@ -905,7 +1041,7 @@ function sperrRechteck(d) {
     t.minimumScaleFactor = 0.7;
     return w;
   }
-  const k = w.addText("ALDI TALK" + (d.stale ? " ⚠︎" : ""));
+  const k = w.addText((auslandTitel(d) || "ALDI TALK") + (d.stale ? " ⚠︎" : ""));
   k.font = Font.semiboldRoundedSystemFont(11);
   const v = w.addText(d.unbegrenzt ? "∞ unbegrenzt" : `${fmtGB(d.left)} GB frei`);
   v.font = Font.boldRoundedSystemFont(17);
@@ -920,7 +1056,7 @@ function sperrRechteck(d) {
 function sperrZeile(d) {
   const w = new ListWidget();
   w.url = skriptURL("dashboard");
-  const t = w.addText(d.error ? "ALDI TALK ⚠︎" : `📶 ${d.unbegrenzt ? "∞" : fmtGB(d.left) + " GB"}${d.resttage !== null ? " · " + d.resttage + " T" : ""}`);
+  const t = w.addText(d.error ? "ALDI TALK ⚠︎" : `${d.ansicht === "roaming" ? flagge(d.roamingLage.land) : "📶"} ${d.unbegrenzt ? "∞" : fmtGB(d.left) + " GB"}${d.resttage !== null ? " · " + d.resttage + " T" : ""}`);
   t.font = Font.mediumSystemFont(12);
   return w;
 }
@@ -1146,6 +1282,16 @@ async function zeigeDashboard(d) {
   await wv.present(false);
 }
 
+/** Erklärung für die Übersicht, was im Ausland gerade gezeigt wird. */
+function roamingText(d) {
+  const lage = d.roamingLage;
+  if (!lage || !lage.aktiv) return "";
+  const wo = lage.manuell ? "Roaming fest eingeschaltet" : `Standort: ${lage.landName || lage.land}`;
+  const inland = d.inland && d.ansicht === "roaming"
+    ? ` · Inland: ${d.inland.unbegrenzt ? "unbegrenzt" : fmtGB(d.inland.left) + " GB frei"}` : "";
+  return `${wo}${inland}${d.roamingHinweis ? " · " + d.roamingHinweis : d.ansicht === "roaming" ? " · Roaming-Volumen wird angezeigt" : ""}`;
+}
+
 function dashboardHTML(d) {
   const daten = JSON.stringify({
     ...d,
@@ -1157,6 +1303,8 @@ function dashboardHTML(d) {
     aktualisiert: d.ts ? fmtRelativ(d.ts) : "",
     warnGB: einstellungen.warnGB,
     version: VERSION,
+    auslandTitel: auslandTitel(d),
+    roamingText: roamingText(d),
   }).replace(/</g, "\\u003c");
   return `<!DOCTYPE html><html lang="de"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -1196,9 +1344,12 @@ summary { cursor: pointer; font-size: 13px; color: var(--text-secondary); margin
 .knoepfe { display: flex; gap: 10px; margin-top: 4px; }
 .knoepfe a { flex: 1; text-align: center; text-decoration: none; font-weight: 650; font-size: 15px; padding: 13px; border-radius: 14px; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border); }
 .knoepfe a.haupt { background: var(--knopf); color: #1a1a1a; border-color: transparent; }
+.roaming { background: var(--surface-1); border: 1px solid var(--border); border-left: 4px solid var(--warning); border-radius: 12px; padding: 10px 12px; margin-bottom: 12px; font-size: 13px; }
+.roaming b { display: block; font-size: 14px; margin-bottom: 2px; }
 .fuss { text-align: center; font-size: 11px; color: var(--muted); margin-top: 14px; }
 </style></head><body><div class="viz-root">
 <header><span class="logo">AT</span><div><h1 id="tarif"></h1><div class="sub" id="nummer"></div></div></header>
+<div class="roaming" id="roaming" hidden><b id="roamingTitel"></b><span id="roamingText"></span></div>
 <div class="karte"><div class="held" id="held"></div><div class="meter"><div id="fuellung"></div></div><div class="status"><span class="punkt" id="punkt"></span><span id="statustext"></span></div></div>
 <div class="kpis" id="kpis"></div>
 <div class="karte"><h2>Verbrauch pro Tag</h2><div class="hinweis">Letzte 14 Tage, geschätzt aus den Abfragen des Widgets</div>
@@ -1218,7 +1369,8 @@ setze("tarif", d.tarif || "ALDI TALK");
 setze("nummer", (d.vertraege && d.vertraege[d.vertragIndex] ? d.vertraege[d.vertragIndex].label : "") + (d.name ? " · " + d.name : ""));
 const held = document.getElementById("held");
 held.textContent = d.unbegrenzt ? "∞ " : gb(d.left) + " ";
-const klein = document.createElement("small"); klein.textContent = d.unbegrenzt ? "unbegrenzt" : "GB frei von " + gb(d.total) + " GB"; held.appendChild(klein);
+const klein = document.createElement("small"); klein.textContent = d.unbegrenzt ? "unbegrenzt" : "GB " + (d.ansicht === "roaming" ? "Roaming " : "") + "frei von " + gb(d.total) + " GB"; held.appendChild(klein);
+if (d.auslandTitel) { document.getElementById("roaming").hidden = false; setze("roamingTitel", d.auslandTitel); setze("roamingText", d.roamingText); }
 const fuell = document.getElementById("fuellung");
 fuell.style.width = Math.round((d.pct || 0) * 100) + "%";
 const statusVar = { leer: "--critical", kritisch: "--critical", warnung: "--warning", gut: "--series-1" }[d.status] || "--series-1";
@@ -1299,7 +1451,7 @@ document.addEventListener("pointerdown", (e) => { if (!(e.target instanceof SVGR
 const pakete = document.getElementById("pakete");
 for (const p of d.pakete || []) {
   const z = document.createElement("div");
-  const n = document.createElement("span"); n.textContent = p.name;
+  const n = document.createElement("span"); n.textContent = (p.roaming ? "🌍 " : "") + p.name;
   const w = document.createElement("span"); w.textContent = p.unbegrenzt ? "unbegrenzt" : gb(p.left) + " / " + gb(p.total) + " GB";
   z.append(n, w); pakete.appendChild(z);
 }
@@ -1336,7 +1488,8 @@ async function hauptmenue() {
   const m = new Alert();
   m.title = "ALDI TALK";
   m.message = d.error ? "⚠︎ " + d.error
-    : `${d.unbegrenzt ? "Unbegrenztes Datenvolumen" : fmtGB(d.left) + " von " + fmtGB(d.total) + " GB frei"}`
+    : (auslandTitel(d) ? auslandTitel(d) + ": " : "")
+      + `${d.unbegrenzt ? "Unbegrenztes Datenvolumen" : fmtGB(d.left) + " von " + fmtGB(d.total) + " GB frei"}`
       + (isNaN(d.guthaben) ? "" : ` · Guthaben ${fmtEuro(d.guthaben)}`)
       + (d.resttage !== null && d.resttage !== undefined ? ` · noch ${d.resttage} Tage` : "")
       + (d.hinweis ? "\n⚠︎ " + d.hinweis : "");
@@ -1379,15 +1532,18 @@ async function einstellungsMenue(d) {
   while (true) {
     const a = new Alert();
     a.title = "Einstellungen";
-    a.message = `ALDI TALK Widget ${VERSION}`;
+    a.message = `ALDI TALK Widget ${VERSION}` + (einstellungen.roaming === "auto" ? "\n" + standortText() : "");
     const designNamen = { aldi: "ALDI-Blau", dunkel: "Dunkel", hell: "Hell", auto: "Automatisch (hell/dunkel)" };
+    const roamingNamen = { auto: "Automatisch (Standort täglich)", an: "Immer Roaming-Volumen", aus: "Aus (immer Inland)" };
     const punkte = [
       [`Design: ${designNamen[einstellungen.design]}`, "design"],
       [`Volumen-Warnung ab: ${fmtGB(einstellungen.warnGB)} GB`, "warnGB"],
       [`Guthaben-Warnung unter: ${fmtEuro(einstellungen.warnGuthaben)}`, "warnGuthaben"],
       [`Mitteilungen: ${einstellungen.mitteilungen ? "an" : "aus"}`, "mitteilungen"],
       [`Aktualisieren alle: ${einstellungen.cacheMin} Min`, "cacheMin"],
+      [`Roaming: ${roamingNamen[einstellungen.roaming] || roamingNamen.auto}`, "roaming"],
     ];
+    if (einstellungen.roaming === "auto") punkte.push(["📍 Standort jetzt prüfen", "standort"]);
     if (d && d.vertraege && d.vertraege.length > 1) punkte.push([`Vertrag: ${d.vertraege[Math.min(einstellungen.vertrag, d.vertraege.length - 1)].label}`, "vertrag"]);
     punkte.push(["Verbrauchsverlauf löschen", "verlauf"]);
     for (const [t] of punkte) a.addAction(t);
@@ -1400,6 +1556,7 @@ async function einstellungsMenue(d) {
         vergissZugangsdaten();
         for (const n of fm.listContents(ORDNER).filter((n) => n.startsWith("alditalk-"))) loesche(n);
         Object.assign(einstellungen, STANDARD);
+        standort = null;
         return;
       }
       continue;
@@ -1421,6 +1578,21 @@ async function einstellungsMenue(d) {
       const optionen = [15, 30, 60, 120];
       const w = await auswahl("Aktualisieren alle …", optionen.map((o) => o + " Minuten"));
       if (w >= 0) einstellungen.cacheMin = optionen[w];
+    } else if (was === "roaming") {
+      const keys = Object.keys(roamingNamen);
+      const w = await auswahl("Roaming-Volumen zeigen …", keys.map((k) => roamingNamen[k]));
+      if (w >= 0) {
+        einstellungen.roaming = keys[w];
+        roamingWahl = keys[w];
+        if (keys[w] === "auto") await pruefeStandort({ erzwingen: true });
+      }
+    } else if (was === "standort") {
+      await pruefeStandort({ erzwingen: true });
+      const info = new Alert();
+      info.title = "Standort";
+      info.message = standortText();
+      info.addAction("OK");
+      await info.presentAlert();
     } else if (was === "vertrag") {
       const w = await auswahl("Vertrag", d.vertraege.map((v) => v.label));
       if (w >= 0) { einstellungen.vertrag = w; vertragIndex = w; }
@@ -1429,6 +1601,15 @@ async function einstellungsMenue(d) {
     }
     speichereEinstellungen();
   }
+}
+
+function standortText() {
+  if (!standort || !standort.land) {
+    return "Standort noch unbekannt" + (standort && standort.fehler ? ` (${standort.fehler}) – Ortungsdienste für Scriptable erlauben (\"Beim Verwenden der App oder Widgets\")` : "");
+  }
+  const wo = `${flagge(standort.land)} ${standort.name}`;
+  const art = standort.land === HEIMATLAND ? "Inland" : EU_LAENDER.includes(standort.land) ? "EU-Roaming" : "Ausland außerhalb der EU";
+  return `Standort: ${wo} (${art}), geprüft ${fmtRelativ(standort.ts)}` + (standort.fehler && standort.fehlTs > standort.ts ? " – letzte Prüfung fehlgeschlagen" : "");
 }
 
 async function auswahl(titel, optionen) {
@@ -1520,6 +1701,7 @@ function fmtRelativ(ts) {
 //  Einstieg (am Ende der Datei: alle Funktionen und Konstanten sind dann bereit)
 // ============================================================
 const param = (args.queryParameters && args.queryParameters.param) || "";
+if (roamingWahl === "auto" && param !== "book" && param !== "portal") await pruefeStandort();
 
 if (param === "book") {
   // Nachbuchen in der Buchungsübersicht (Safari-Sitzung – dort meist schon angemeldet).
