@@ -30,7 +30,7 @@
 // ============================================================
 
 const SCRIPT_NAME = "AldiTalk";
-const VERSION = "2.2";
+const VERSION = "2.3";
 
 // --- Endpunkte (Stand: Kundenportal 2026) ---------------------
 const PORTAL = "https://www.alditalk-kundenportal.de";
@@ -388,24 +388,34 @@ async function fetchLive(creds) {
   const pakete = [];
   const sonstige = [];
   let tarif = "";
+  const gesehen = new Set();
+  const datenPaket = (p, offer, roaming) => {
+    const allocated = parseFloat(p.allocated);
+    const used = parseFloat(p.used);
+    const div = UNIT_TO_GB[String(p.unit || "kilobytes").toLowerCase()] || UNIT_TO_GB.kilobytes;
+    const total = allocated / div;
+    pakete.push({
+      name: p.name || p.packName || (offer && offer.offerName) || (roaming ? "Roaming" : "Datenvolumen"),
+      total,
+      left: (allocated - used) / div,
+      expires: p.nextExpirationDate || p.expirationDate || (offer && (offer.nextExpirationDate || offer.expirationDate)) || "",
+      unbegrenzt: p.unlimited === true || allocated < 0 || total >= 10000,
+      roaming,
+    });
+  };
+  // Volumen-Einheit (Bytes … GB) statt Minuten/SMS?
+  const istVolumen = (p) => /data|daten/.test(String(p.type || "").toLowerCase()) || !!UNIT_TO_GB[String(p.unit || "").toLowerCase()];
   for (const offer of offers.subscribedOffers || []) {
     if (!tarif && offer.offerName) tarif = offer.offerName;
     for (const p of offer.pack || []) {
+      gesehen.add(p);
       const typ = String(p.type || "").toLowerCase();
       const allocated = parseFloat(p.allocated);
       const used = parseFloat(p.used);
       if (isNaN(allocated) || isNaN(used)) continue;
-      if (/data|daten/.test(typ)) {
-        const div = UNIT_TO_GB[String(p.unit || "kilobytes").toLowerCase()] || UNIT_TO_GB.kilobytes;
-        const total = allocated / div;
-        pakete.push({
-          name: p.name || p.packName || offer.offerName || "Datenvolumen",
-          total,
-          left: (allocated - used) / div,
-          expires: p.nextExpirationDate || p.expirationDate || "",
-          unbegrenzt: p.unlimited === true || allocated < 0 || total >= 10000,
-          roaming: istRoamingPaket(p, offer),
-        });
+      const roaming = istRoamingPaket(p, offer);
+      if (/data|daten/.test(typ) || (roaming && istVolumen(p))) {
+        datenPaket(p, offer, roaming);
       } else if (typ === "voice" || typ === "sms" || typ === "minutes") {
         sonstige.push({
           typ: typ === "sms" ? "SMS" : "Minuten",
@@ -416,6 +426,20 @@ async function fetchLive(creds) {
       }
     }
   }
+  // Das Roaming-Volumen ("Roaming EU" in der ALDI-TALK-App) steht evtl. nicht bei den
+  // Paketen, sondern woanders in der Antwort – dort nach Roaming-Volumen suchen.
+  const durchsuche = (wert, kontext, offer, tiefe) => {
+    if (!wert || typeof wert !== "object" || tiefe > 8) return;
+    if (Array.isArray(wert)) { wert.forEach((w) => durchsuche(w, kontext, offer, tiefe + 1)); return; }
+    const hier = kontext + " " + [wert.offerName, wert.name, wert.title, wert.displayName].filter((x) => typeof x === "string").join(" ");
+    if (!gesehen.has(wert) && !isNaN(parseFloat(wert.allocated)) && !isNaN(parseFloat(wert.used))
+      && istVolumen(wert) && (istRoamingPaket(wert, offer) || /roaming/i.test(hier))) {
+      gesehen.add(wert);
+      datenPaket(wert, offer, true);
+    }
+    for (const [k, v] of Object.entries(wert)) durchsuche(v, hier + " " + k, wert.offerName ? wert : offer, tiefe + 1);
+  };
+  durchsuche(offers, "", null, 0);
   if (!pakete.length) throw new Error("Kein Datenpaket gefunden");
 
   // Alle Datenpakete zusammen (Tarif + nachgebuchte Pakete), Roaming-Pakete getrennt.
@@ -1510,7 +1534,7 @@ async function hauptmenue() {
   const m = new Alert();
   m.title = "ALDI TALK";
   m.message = d.error ? "⚠︎ " + d.error
-    : (auslandTitel(d) ? auslandTitel(d) + ": " : "")
+    : (auslandTitel(d) ? auslandTitel(d) + (d.roamingLage.landName ? ` (${d.roamingLage.landName})` : "") + ": " : "")
       + `${d.unbegrenzt ? "Unbegrenztes Datenvolumen" : fmtGB(d.left) + " von " + fmtGB(d.total) + " GB frei"}`
       + (isNaN(d.guthaben) ? "" : ` · Guthaben ${fmtEuro(d.guthaben)}`)
       + (d.resttage !== null && d.resttage !== undefined ? ` · noch ${d.resttage} Tage` : "")
