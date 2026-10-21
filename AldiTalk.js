@@ -30,7 +30,7 @@
 // ============================================================
 
 const SCRIPT_NAME = "AldiTalk";
-const VERSION = "2.3";
+const VERSION = "2.4";
 
 // --- Endpunkte (Stand: Kundenportal 2026) ---------------------
 const PORTAL = "https://www.alditalk-kundenportal.de";
@@ -198,7 +198,7 @@ async function pruefeStandort({ erzwingen = false } = {}) {
   if (!erzwingen && standort && standort.tag === heute) return standort;
   if (!erzwingen && standort && standort.fehlTs && Date.now() - standort.fehlTs < 3600 * 1000) return standort;
   try {
-    Location.setAccuracyToThreeKilometers(); // grob reicht – schneller und spart Akku
+    Location.setAccuracyToKilometer(); // fürs Land reicht das – schneller und spart Akku
     const pos = await mitZeitlimit(Location.current(), 8000);
     const orte = await mitZeitlimit(Location.reverseGeocode(pos.latitude, pos.longitude, "de"), 6000);
     const ort = (orte && orte[0]) || {};
@@ -273,6 +273,13 @@ function anonymisiere(wert, schluessel = "") {
   }
   if (typeof wert === "string") return wert.replace(/\d{7,}/g, "…");
   return wert;
+}
+
+/** Gilt ein Eintrag aus unlimitedUsage.includedDataVolume fürs Ausland? ("euOnly", "Roaming EU") */
+function istRoamingGruppe(g) {
+  const text = [g.countryGroup, g.countryGroupLabel, g.allowanceParameter].filter(Boolean).join(" ");
+  if (/germany|inland|domestic/i.test(String(g.countryGroup || "") + " " + String(g.countryGroupLabel || ""))) return false;
+  return /eu|roaming|fup|world|international|ausland/i.test(text);
 }
 
 /** Datenpakete zu einem Wert zusammenfassen (Ablauf: das des größten Pakets). */
@@ -389,13 +396,13 @@ async function fetchLive(creds) {
   const sonstige = [];
   let tarif = "";
   const gesehen = new Set();
-  const datenPaket = (p, offer, roaming) => {
+  const datenPaket = (p, offer, roaming, gruppe) => {
     const allocated = parseFloat(p.allocated);
     const used = parseFloat(p.used);
     const div = UNIT_TO_GB[String(p.unit || "kilobytes").toLowerCase()] || UNIT_TO_GB.kilobytes;
     const total = allocated / div;
     pakete.push({
-      name: p.name || p.packName || (offer && offer.offerName) || (roaming ? "Roaming" : "Datenvolumen"),
+      name: p.name || p.packName || (roaming && gruppe && gruppe.countryGroupLabel) || (offer && offer.offerName) || (roaming ? "Roaming" : "Datenvolumen"),
       total,
       left: (allocated - used) / div,
       expires: p.nextExpirationDate || p.expirationDate || (offer && (offer.nextExpirationDate || offer.expirationDate)) || "",
@@ -405,17 +412,24 @@ async function fetchLive(creds) {
   };
   // Volumen-Einheit (Bytes … GB) statt Minuten/SMS?
   const istVolumen = (p) => /data|daten/.test(String(p.type || "").toLowerCase()) || !!UNIT_TO_GB[String(p.unit || "").toLowerCase()];
-  for (const offer of offers.subscribedOffers || []) {
-    if (!tarif && offer.offerName) tarif = offer.offerName;
+  // Pakete eines Angebots (Tarif oder Zusatzangebot wie "Gratis-Volumen 25 GB").
+  // ALDI TALK nennt unter unlimitedUsage.includedDataVolume für jedes Datenpaket – in derselben
+  // Reihenfolge –, wo es gilt: countryGroup "germanyOnly" (Inland) oder "euOnly" (Roaming EU =
+  // EU-Fair-Use-Grenze, ein eigener Zähler). Danach richtet sich, was Roaming ist.
+  const nimmAngebot = (offer) => {
+    const gruppen = ((offer.unlimitedUsage || {}).includedDataVolume) || [];
+    const datenPakete = (offer.pack || []).filter((p) => /data|daten/.test(String(p.type || "").toLowerCase()));
+    const gruppenPassen = gruppen.length === datenPakete.length;
     for (const p of offer.pack || []) {
       gesehen.add(p);
       const typ = String(p.type || "").toLowerCase();
       const allocated = parseFloat(p.allocated);
       const used = parseFloat(p.used);
       if (isNaN(allocated) || isNaN(used)) continue;
-      const roaming = istRoamingPaket(p, offer);
+      const gruppe = gruppenPassen ? gruppen[datenPakete.indexOf(p)] : null;
+      const roaming = gruppe ? istRoamingGruppe(gruppe) : istRoamingPaket(p, offer);
       if (/data|daten/.test(typ) || (roaming && istVolumen(p))) {
-        datenPaket(p, offer, roaming);
+        datenPaket(p, offer, roaming, gruppe);
       } else if (typ === "voice" || typ === "sms" || typ === "minutes") {
         sonstige.push({
           typ: typ === "sms" ? "SMS" : "Minuten",
@@ -424,6 +438,13 @@ async function fetchLive(creds) {
           unbegrenzt: p.unlimited === true || allocated < 0 || allocated >= 100000,
         });
       }
+    }
+  };
+  for (const offer of offers.subscribedOffers || []) {
+    if (!tarif && offer.offerName) tarif = offer.offerName;
+    nimmAngebot(offer);
+    for (const zusatz of offer.addOnsDetails || []) {
+      if (!/inactive|terminated|expired/i.test(String(zusatz.status || ""))) nimmAngebot(zusatz);
     }
   }
   // Das Roaming-Volumen ("Roaming EU" in der ALDI-TALK-App) steht evtl. nicht bei den
@@ -1638,7 +1659,7 @@ async function einstellungsMenue(d) {
       const info = new Alert();
       info.title = "Fehlersuche";
       if (roh) {
-        Pasteboard.copyString(JSON.stringify({ version: VERSION, pakete: (d && d.pakete) || [], portal: roh }, null, 1));
+        Pasteboard.copyString(JSON.stringify({ version: VERSION, pakete: (d && d.pakete) || [], standort, roaming: roamingWahl, portal: roh }, null, 1));
         info.message = "Die Paketdaten des Portals sind kopiert – ohne Rufnummer, Namen und Guthaben. Du kannst sie jetzt z. B. in eine Nachricht einfügen.";
       } else {
         info.message = "Noch keine Daten – bitte erst einmal aktualisieren.";
@@ -1760,7 +1781,11 @@ function fmtRelativ(ts) {
 //  Einstieg (am Ende der Datei: alle Funktionen und Konstanten sind dann bereit)
 // ============================================================
 const param = (args.queryParameters && args.queryParameters.param) || "";
-if (roamingWahl === "auto" && param !== "book" && param !== "portal") await pruefeStandort();
+// In der App jedes Mal frisch prüfen (höchstens alle 10 Minuten), im Widget einmal am Tag.
+const inDerApp = !(config.runsInWidget || config.runsInAccessoryWidget);
+if (roamingWahl === "auto" && param !== "book" && param !== "portal") {
+  await pruefeStandort({ erzwingen: inDerApp && !(standort && standort.ts && Date.now() - standort.ts < 10 * 60 * 1000) });
+}
 
 if (param === "book") {
   // Nachbuchen in der Buchungsübersicht (Safari-Sitzung – dort meist schon angemeldet).
