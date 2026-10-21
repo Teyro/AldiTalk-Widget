@@ -113,3 +113,9 @@ password). The widget deliberately stops trying so the account doesn't get locke
 the script in the app and enter the login again.
 
 Unofficial, not a product of ALDI TALK.
+
+## Updates
+
+Das Skript prüft einmal am Tag, ob es eine neue Version gibt (Kanal: github.com/Teyro/Scriptable-Updates),
+und installiert sie automatisch – vorher wird die Datei auf Echtheit geprüft, die alte Fassung bleibt als
+Sicherung. Im Skript-Menü unter „⬆️ Updates“: jetzt suchen, automatisch / nur melden / aus.
