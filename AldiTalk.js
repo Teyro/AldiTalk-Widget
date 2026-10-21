@@ -30,7 +30,7 @@
 // ============================================================
 
 const SCRIPT_NAME = "AldiTalk";
-const VERSION = "2.5";
+const VERSION = "2.6";
 
 // --- Endpunkte (Stand: Kundenportal 2026) ---------------------
 const PORTAL = "https://www.alditalk-kundenportal.de";
@@ -1042,10 +1042,10 @@ function gross(w, d, D) {
   const diagramm = w.addImage(balkenBild(d.tageVerbrauch, d.tagesbudget, D, 306, 62));
   diagramm.imageSize = new Size(306, 62);
 
-  if (d.pakete && d.pakete.length > 1) {
+  // Im Ausland nur die Roaming-Pakete – Tarif- und Gratis-Volumen gelten dort nicht.
+  const liste = (d.pakete || []).filter((p) => (d.ansicht === "roaming") === !!p.roaming);
+  if (liste.length > 1) {
     w.addSpacer(8);
-    // Im Ausland die Roaming-Pakete zuerst.
-    const liste = d.ansicht === "roaming" ? [...d.pakete.filter((p) => p.roaming), ...d.pakete.filter((p) => !p.roaming)] : d.pakete;
     for (const p of liste.slice(0, 2)) paketZeile(w, p, D);
   }
 
@@ -1368,9 +1368,8 @@ function roamingText(d) {
   const lage = d.roamingLage;
   if (!lage || !lage.aktiv) return "";
   const wo = lage.manuell ? "Roaming fest eingeschaltet" : `Standort: ${lage.landName || lage.land}`;
-  const inland = d.inland && d.ansicht === "roaming"
-    ? ` · Inland: ${d.inland.unbegrenzt ? "unbegrenzt" : fmtGB(d.inland.left) + " GB frei"}` : "";
-  return `${wo}${inland}${d.roamingHinweis ? " · " + d.roamingHinweis : d.ansicht === "roaming" ? " · Roaming-Volumen wird angezeigt" : ""}`;
+  return `${wo}${d.roamingHinweis ? " · " + d.roamingHinweis
+    : d.ansicht === "roaming" ? " · Es zählt nur das EU-Roaming-Volumen, Tarif- und Gratis-Volumen gelten nur in Deutschland" : ""}`;
 }
 
 function dashboardHTML(d) {
@@ -1531,11 +1530,24 @@ if (d.tagesbudget) {
 }
 document.addEventListener("pointerdown", (e) => { if (!(e.target instanceof SVGRectElement)) tip.style.display = "none"; });
 const pakete = document.getElementById("pakete");
-for (const p of d.pakete || []) {
+const paketZeile = (p, gedimmt) => {
   const z = document.createElement("div");
+  if (gedimmt) z.style.color = "var(--muted)";
   const n = document.createElement("span"); n.textContent = (p.roaming ? "🌍 " : "") + p.name;
   const w = document.createElement("span"); w.textContent = p.unbegrenzt ? "unbegrenzt" : gb(p.left) + " / " + gb(p.total) + " GB";
   z.append(n, w); pakete.appendChild(z);
+};
+if (d.ansicht === "roaming") {
+  // Im Ausland zählt nur das Roaming-Volumen; der Rest steht zur Info darunter.
+  (d.pakete || []).filter(p => p.roaming).forEach(p => paketZeile(p, false));
+  const rest = (d.pakete || []).filter(p => !p.roaming);
+  if (rest.length) {
+    const h = document.createElement("h2"); h.textContent = "Gilt nur in Deutschland"; h.style.cssText = "margin-top:14px;font-size:13px;color:var(--muted)";
+    pakete.appendChild(h);
+    rest.forEach(p => paketZeile(p, true));
+  }
+} else {
+  (d.pakete || []).forEach(p => paketZeile(p, false));
 }
 for (const s of d.sonstige || []) {
   const z = document.createElement("div");
