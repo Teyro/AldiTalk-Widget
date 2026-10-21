@@ -30,7 +30,7 @@
 // ============================================================
 
 const SCRIPT_NAME = "AldiTalk";
-const VERSION = "2.4";
+const VERSION = "2.5";
 
 // --- Endpunkte (Stand: Kundenportal 2026) ---------------------
 const PORTAL = "https://www.alditalk-kundenportal.de";
@@ -305,7 +305,8 @@ function forceRefresh() { loesche(cacheName()); }
 
 async function holeDaten({ erzwingen = false } = {}) {
   const cache = liesJSON(cacheName(), null);
-  const frisch = cache && cache.ts && (Date.now() - cache.ts) < einstellungen.cacheMin * 60 * 1000;
+  // Daten einer älteren Version neu holen – sie hat die Pakete evtl. anders ausgewertet.
+  const frisch = cache && cache.ts && cache.version === VERSION && (Date.now() - cache.ts) < einstellungen.cacheMin * 60 * 1000;
   if (frisch && !erzwingen) return ergaenze({ ...cache, stale: false });
 
   // Zugangsdaten wurden abgelehnt: NICHT weiter probieren (Kontosperre!).
@@ -323,6 +324,7 @@ async function holeDaten({ erzwingen = false } = {}) {
   try {
     const live = await fetchLive(creds);
     live.ts = Date.now();
+    live.version = VERSION;
     schreibJSON(cacheName(), live);
     hebeLoginSperreAuf();
     merkeVerlauf(live, "inland");
@@ -345,13 +347,15 @@ function ergaenze(d) {
   d.roamingLage = lage;
   if (lage.aktiv) {
     d.inland = { left: d.left, total: d.total, unbegrenzt: d.unbegrenzt, expires: d.expires };
+    // Die Schätzung gilt nur in der EU – außerhalb gibt es kein Inklusiv-Volumen.
+    if (d.roaming && d.roaming.geschaetzt && !lage.eu) d.roaming = null;
     if (d.roaming) {
       Object.assign(d, d.roaming);
       d.ansicht = "roaming";
     }
-    d.roamingHinweis = d.roaming
-      ? (lage.eu ? "" : "Außerhalb der EU – Datennutzung kann extra kosten")
-      : (lage.eu ? "Im EU-Ausland gilt dein normales Volumen" : "Außerhalb der EU – Datennutzung kann extra kosten");
+    d.roamingHinweis = !lage.eu ? "Außerhalb der EU – Datennutzung kann extra kosten"
+      : !d.roaming ? "Im EU-Ausland gilt dein normales Volumen"
+      : d.roaming.geschaetzt ? "Geschätzt: ⅔ des Tarifvolumens (EU-Fair-Use)" : "";
   }
   const tage = resttage(d.expires);
   d.resttage = tage;
@@ -396,7 +400,7 @@ async function fetchLive(creds) {
   const sonstige = [];
   let tarif = "";
   const gesehen = new Set();
-  const datenPaket = (p, offer, roaming, gruppe) => {
+  const datenPaket = (p, offer, roaming, gruppe, zusatz) => {
     const allocated = parseFloat(p.allocated);
     const used = parseFloat(p.used);
     const div = UNIT_TO_GB[String(p.unit || "kilobytes").toLowerCase()] || UNIT_TO_GB.kilobytes;
@@ -408,6 +412,7 @@ async function fetchLive(creds) {
       expires: p.nextExpirationDate || p.expirationDate || (offer && (offer.nextExpirationDate || offer.expirationDate)) || "",
       unbegrenzt: p.unlimited === true || allocated < 0 || total >= 10000,
       roaming,
+      zusatz: !!zusatz,
     });
   };
   // Volumen-Einheit (Bytes … GB) statt Minuten/SMS?
@@ -416,7 +421,7 @@ async function fetchLive(creds) {
   // ALDI TALK nennt unter unlimitedUsage.includedDataVolume für jedes Datenpaket – in derselben
   // Reihenfolge –, wo es gilt: countryGroup "germanyOnly" (Inland) oder "euOnly" (Roaming EU =
   // EU-Fair-Use-Grenze, ein eigener Zähler). Danach richtet sich, was Roaming ist.
-  const nimmAngebot = (offer) => {
+  const nimmAngebot = (offer, zusatz) => {
     const gruppen = ((offer.unlimitedUsage || {}).includedDataVolume) || [];
     const datenPakete = (offer.pack || []).filter((p) => /data|daten/.test(String(p.type || "").toLowerCase()));
     const gruppenPassen = gruppen.length === datenPakete.length;
@@ -429,7 +434,7 @@ async function fetchLive(creds) {
       const gruppe = gruppenPassen ? gruppen[datenPakete.indexOf(p)] : null;
       const roaming = gruppe ? istRoamingGruppe(gruppe) : istRoamingPaket(p, offer);
       if (/data|daten/.test(typ) || (roaming && istVolumen(p))) {
-        datenPaket(p, offer, roaming, gruppe);
+        datenPaket(p, offer, roaming, gruppe, zusatz);
       } else if (typ === "voice" || typ === "sms" || typ === "minutes") {
         sonstige.push({
           typ: typ === "sms" ? "SMS" : "Minuten",
@@ -444,7 +449,7 @@ async function fetchLive(creds) {
     if (!tarif && offer.offerName) tarif = offer.offerName;
     nimmAngebot(offer);
     for (const zusatz of offer.addOnsDetails || []) {
-      if (!/inactive|terminated|expired/i.test(String(zusatz.status || ""))) nimmAngebot(zusatz);
+      if (!/inactive|terminated|expired/i.test(String(zusatz.status || ""))) nimmAngebot(zusatz, true);
     }
   }
   // Das Roaming-Volumen ("Roaming EU" in der ALDI-TALK-App) steht evtl. nicht bei den
@@ -472,12 +477,21 @@ async function fetchLive(creds) {
     inlandPakete = pakete;
     roamingPakete = [];
   }
+  // Kein eigener EU-Zähler: grob schätzen. Im EU-Ausland gelten etwa 2/3 des Tarifvolumens
+  // (EU-Fair-Use); Gratis- und Zusatzvolumen zählen dort nicht.
+  let roaming = summiere(roamingPakete);
+  const tarifPakete = inlandPakete.filter((p) => !p.zusatz && !p.unbegrenzt);
+  if (!roaming && tarifPakete.length) {
+    const t = summiere(tarifPakete);
+    const total = t.total * 2 / 3;
+    roaming = { left: Math.min(total, t.left), total, unbegrenzt: false, expires: t.expires, geschaetzt: true };
+  }
   return {
     name: details.firstName || "",
     tarif,
     guthaben: parseFloat(offers.totalBalance),
     ...summiere(inlandPakete),
-    roaming: summiere(roamingPakete),
+    roaming,
     pakete: pakete.map((p) => ({ ...p, left: p.unbegrenzt ? null : p.left, total: p.unbegrenzt ? null : p.total })),
     sonstige,
     vertraege,
@@ -1387,7 +1401,8 @@ function dashboardHTML(d) {
   --series-1: #3987e5; --track: #184f95; --deemph: #383835; } }
 * { box-sizing: border-box; }
 body { margin: 0; font-family: system-ui, -apple-system, sans-serif; }
-.viz-root { background: var(--page); color: var(--text-primary); min-height: 100vh; padding: 20px 16px 40px; }
+/* oben Platz für die "Close"-Leiste, die Scriptable über die Seite legt */
+.viz-root { background: var(--page); color: var(--text-primary); min-height: 100vh; padding: 72px 16px 40px; }
 header { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
 .logo { background: #2a9ee0; color: #fff; font-weight: 800; font-size: 13px; border-radius: 6px; padding: 3px 6px; }
 h1 { font-size: 17px; margin: 0; } .sub { color: var(--text-secondary); font-size: 13px; }
