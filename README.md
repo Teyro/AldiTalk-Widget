@@ -70,4 +70,7 @@ das Skript einmal in der App öffnen und „Zugangsdaten neu eingeben“ wählen
   mit Abfrage.
 - Wie ALDI TALK Roaming-Pakete im Portal kennzeichnet, ist nicht offiziell dokumentiert.
   Das Widget erkennt sie an Feldern bzw. am Namen („EU-Roaming“, „Ausland“, „World“ …).
-  Wird keins erkannt, gilt im EU-Ausland das normale Volumen.
+  Wird keins erkannt, gilt im EU-Ausland das normale Volumen. Das EU-Roaming-Volumen ist ein
+  Teil des normalen Volumens und wird deshalb nie dazugezählt.
+- Zeigt das Widget falsche Werte: *Einstellungen → 🧪 Daten für Fehlersuche kopieren*. Das
+  kopiert die Paketdaten des Portals ohne Rufnummer, Namen und Guthaben.

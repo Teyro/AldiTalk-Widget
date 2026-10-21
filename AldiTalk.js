@@ -30,7 +30,7 @@
 // ============================================================
 
 const SCRIPT_NAME = "AldiTalk";
-const VERSION = "2.1";
+const VERSION = "2.2";
 
 // --- Endpunkte (Stand: Kundenportal 2026) ---------------------
 const PORTAL = "https://www.alditalk-kundenportal.de";
@@ -241,17 +241,38 @@ function flagge(land) {
 
 /**
  * Ist ein Datenpaket ein Roaming-Paket? Die Feldnamen sind geraten (kein Testkonto):
- * erst eindeutige Felder, dann der Name ("EU-Roaming", "Ausland", "World" …).
+ * erst eindeutige Felder, dann jedes andere Textfeld mit "Roaming" (die ALDI-TALK-App
+ * beschriftet das Paket "Roaming EU"), dann Name/Beschreibung von Paket und Angebot.
  * "inkl. EU-Roaming" im Tarifnamen zählt NICHT als Roaming-Paket.
+ * Wichtig: Das EU-Roaming-Volumen ist ein Teil des normalen Volumens, kein zusätzliches –
+ * es darf deshalb nie zum Inlandsvolumen dazugezählt werden.
  */
-function istRoamingPaket(p) {
+function istRoamingPaket(p, offer) {
   if (p.roaming === true || p.isRoaming === true || p.roamingPack === true) return true;
   const zone = String(p.zone || p.region || p.area || p.usageArea || "").toLowerCase();
   if (zone && /roaming|eu|ausland|international|world|abroad/.test(zone)) return true;
-  if (/roaming/.test(String(p.type || "").toLowerCase())) return true;
-  const text = [p.name, p.packName, p.description].filter(Boolean).join(" ");
-  if (/inkl|inklusive|incl/i.test(text)) return false;
-  return /roaming|ausland|international|world|weltweit/i.test(text) || /(^|[^a-zäöü])eu([^a-zäöü]|$)/i.test(text);
+  const textFelder = ["name", "packName", "description"];
+  for (const [k, v] of Object.entries(p)) {
+    if (!textFelder.includes(k) && typeof v === "string" && /roaming/i.test(v)) return true;
+  }
+  const passt = (text) => !/inkl|inklusive|incl/i.test(text)
+    && (/roaming|ausland|international|world|weltweit/i.test(text) || /(^|[^a-zäöü])eu([^a-zäöü]|$)/i.test(text));
+  if (passt(textFelder.map((k) => p[k]).filter(Boolean).join(" "))) return true;
+  // Eigenes Angebot "Roaming EU", dessen Paket nur "Datenvolumen" heißt.
+  return !!offer && passt([offer.offerName, offer.name, offer.description].filter(Boolean).join(" "));
+}
+
+/** Antwort des Portals ohne persönliche Daten (Nummern, IDs, Namen, Guthaben) – zum Weitergeben bei Fehlern. */
+function anonymisiere(wert, schluessel = "") {
+  if (/msisdn|phone|rufnummer|contract|customer|kunde|iban|mail|adress|address|firstname|lastname|balance|guthaben|^id$|token/i.test(schluessel)) return "…";
+  if (Array.isArray(wert)) return wert.map((w) => anonymisiere(w));
+  if (wert && typeof wert === "object") {
+    const neu = {};
+    for (const [k, v] of Object.entries(wert)) neu[k] = anonymisiere(v, k);
+    return neu;
+  }
+  if (typeof wert === "string") return wert.replace(/\d{7,}/g, "…");
+  return wert;
 }
 
 /** Datenpakete zu einem Wert zusammenfassen (Ablauf: das des größten Pakets). */
@@ -362,6 +383,7 @@ async function fetchLive(creds) {
 
   const offers = await versucheJSON(BFF209 + "/v1/offers?contractId=" + encodeURIComponent(contractId) + "&productType=");
   if (!offers) throw new Error("Tarifdaten nicht abrufbar");
+  try { schreibJSON(`alditalk-rohdaten-${vertragIndex}.json`, anonymisiere(offers)); } catch (e) { /* nur für die Fehlersuche */ }
 
   const pakete = [];
   const sonstige = [];
@@ -382,7 +404,7 @@ async function fetchLive(creds) {
           left: (allocated - used) / div,
           expires: p.nextExpirationDate || p.expirationDate || "",
           unbegrenzt: p.unlimited === true || allocated < 0 || total >= 10000,
-          roaming: istRoamingPaket(p),
+          roaming: istRoamingPaket(p, offer),
         });
       } else if (typ === "voice" || typ === "sms" || typ === "minutes") {
         sonstige.push({
@@ -1546,6 +1568,7 @@ async function einstellungsMenue(d) {
     if (einstellungen.roaming === "auto") punkte.push(["📍 Standort jetzt prüfen", "standort"]);
     if (d && d.vertraege && d.vertraege.length > 1) punkte.push([`Vertrag: ${d.vertraege[Math.min(einstellungen.vertrag, d.vertraege.length - 1)].label}`, "vertrag"]);
     punkte.push(["Verbrauchsverlauf löschen", "verlauf"]);
+    punkte.push(["🧪 Daten für Fehlersuche kopieren", "rohdaten"]);
     for (const [t] of punkte) a.addAction(t);
     a.addDestructiveAction("Alles zurücksetzen (inkl. Zugangsdaten)");
     a.addCancelAction("Fertig");
@@ -1586,6 +1609,18 @@ async function einstellungsMenue(d) {
         roamingWahl = keys[w];
         if (keys[w] === "auto") await pruefeStandort({ erzwingen: true });
       }
+    } else if (was === "rohdaten") {
+      const roh = liesJSON(`alditalk-rohdaten-${vertragIndex}.json`, null);
+      const info = new Alert();
+      info.title = "Fehlersuche";
+      if (roh) {
+        Pasteboard.copyString(JSON.stringify({ version: VERSION, pakete: (d && d.pakete) || [], portal: roh }, null, 1));
+        info.message = "Die Paketdaten des Portals sind kopiert – ohne Rufnummer, Namen und Guthaben. Du kannst sie jetzt z. B. in eine Nachricht einfügen.";
+      } else {
+        info.message = "Noch keine Daten – bitte erst einmal aktualisieren.";
+      }
+      info.addAction("OK");
+      await info.presentAlert();
     } else if (was === "standort") {
       await pruefeStandort({ erzwingen: true });
       const info = new Alert();
