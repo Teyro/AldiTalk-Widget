@@ -31,7 +31,17 @@ Auf Deutsch und Englisch.
   Füllbalken, Knöpfe zum Nachbuchen, Aktualisieren und fürs Kundenportal.
 - **Designs:** ALDI-Blau, Dunkel, Hell oder Automatisch – pro Widget wählbar.
 - **Sprache:** Deutsch oder Englisch – automatisch wie das iPhone oder fest eingestellt.
-- **Mehrere Rufnummern** im selben Kundenkonto.
+- **Mehrere Rufnummern** im selben Kundenkonto – mit dem Widget-Parameter `alle` auch
+  untereinander in einem Widget (bis zu 4), mit eigenen Namen wie „Papa“.
+- **Siri & Kurzbefehle:** „Hey Siri, ALDI TALK“ – Siri sagt Restvolumen, Verlängerung,
+  Prognose und Guthaben (Anleitung im Menü unter „🎙 Siri & Kurzbefehle“).
+- **Tipps per Mitteilung:** wenn kurz vor der Verlängerung noch viel Volumen übrig ist,
+  wenn heute ungewöhnlich viel verbraucht wurde (z. B. ein Update übers Mobilnetz) und
+  wenn sich der Tarif verlängert hat – mit dem Verbrauch des letzten Zeitraums.
+- **Rückblick & Tarif-Check:** die Übersicht zeigt den Verbrauch der letzten Zeiträume und
+  ab zwei vollständigen Zeiträumen, ob ein kleinerer oder größerer Tarif besser passt.
+- **Erinnerung an die Verlängerung** in der Erinnerungen-App (1 oder 3 Tage vorher),
+  jedes Mal automatisch neu eingetragen.
 
 ## Einrichten
 
@@ -51,8 +61,11 @@ Automatisch einstellen* eingeschaltet lassen.
 
 **Widget-Parameter** (optional, beim Bearbeiten des Widgets, mit Komma kombinierbar):
 `2` = zweite Rufnummer des Kontos · `hell` / `dunkel` / `aldi` / `auto` = Design ·
-`roaming` / `inland` = immer Roaming- bzw. Inlandsvolumen · `de` / `en` = Sprache.
-Beispiel: `2, hell, en`.
+`roaming` / `inland` = immer Roaming- bzw. Inlandsvolumen · `de` / `en` = Sprache ·
+`alle` = alle Rufnummern in einem Widget. Beispiel: `2, hell, en`.
+
+**Siri:** In der Kurzbefehle-App einen Kurzbefehl mit der Aktion „Skript ausführen“
+(Scriptable) anlegen, das Skript `AldiTalk` wählen und ihn z. B. „ALDI TALK“ nennen.
 
 ## In der App
 
@@ -97,7 +110,10 @@ fair-use limit reported by ALDI TALK) with the country's flag; outside the EU a 
 warning · **country detection** via GPS, falling back to the iPhone's time zone, or set
 manually; a time-zone change triggers an immediate re-check; country history · daily
 budget · usage per day (14 days) · forecast · notifications · overview with roaming/home
-toggle · designs · several phone numbers.
+toggle · designs · several phone numbers (parameter `alle` shows them all in one widget) ·
+**Siri & Shortcuts** (“Hey Siri, ALDI TALK” reads out data, renewal, forecast and balance) ·
+tips (data left over before renewal, unusually high usage, plan renewed) · review of past
+periods with a plan check · renewal reminder in the Reminders app.
 
 **Setup:** install [Scriptable](https://apps.apple.com/app/scriptable/id1405459188), create a
 script named exactly `AldiTalk`, paste [`AldiTalk.js`](AldiTalk.js), run it once in the app
@@ -106,7 +122,7 @@ Scriptable widget and pick `AldiTalk`. Allow location access for Scriptable
 (“While Using the App or Widgets”).
 
 **Widget parameter** (optional, comma-separated): `2` second number · `hell`/`dunkel`/`aldi`/`auto`
-design · `roaming`/`inland` always roaming/home allowance · `de`/`en` language.
+design · `roaming`/`inland` always roaming/home allowance · `de`/`en` language · `alle` all numbers.
 
 If “Login rejected” appears, ALDI TALK refused the saved login (usually a changed
 password). The widget deliberately stops trying so the account doesn't get locked – open
