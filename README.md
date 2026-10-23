@@ -42,6 +42,15 @@ Auf Deutsch und Englisch.
   ab zwei vollständigen Zeiträumen, ob ein kleinerer oder größerer Tarif besser passt.
 - **Erinnerung an die Verlängerung** in der Erinnerungen-App (1 oder 3 Tage vorher),
   jedes Mal automatisch neu eingetragen.
+- **Tagesbudget-Ampel:** „Heute 0,40 / 0,55 GB“ in grün, gelb oder rot – und eine Mitteilung, wenn
+  das Tagesbudget überschritten ist.
+- **StandBy:** Widget-Parameter `standby` – eine riesige Zahl fürs quer liegende iPhone am Ladekabel.
+- **Aufladungen** werden erkannt (Guthaben steigt) und in der Übersicht aufgelistet.
+- **Wann du surfst:** Verbrauch nach Tageszeit (Nacht, Vormittag, Nachmittag, Abend) in der Übersicht.
+- **Reise-Vorschau** (Land & Roaming): Land wählen und sehen, was dort gilt.
+- **Home Assistant:** Restvolumen, Guthaben, Laufzeit und heutiger Verbrauch als Sensoren
+  `sensor.aldi_talk_…` (Einstellungen → Home Assistant; nutzt auf Wunsch einen vorhandenen Zugang).
+- **iPhone & iPad abgleichen** über iCloud (Einstellungen, Verlauf, Rückblick, Aufladungen).
 
 ## Einrichten
 
@@ -62,7 +71,7 @@ Automatisch einstellen* eingeschaltet lassen.
 **Widget-Parameter** (optional, beim Bearbeiten des Widgets, mit Komma kombinierbar):
 `2` = zweite Rufnummer des Kontos · `hell` / `dunkel` / `aldi` / `auto` = Design ·
 `roaming` / `inland` = immer Roaming- bzw. Inlandsvolumen · `de` / `en` = Sprache ·
-`alle` = alle Rufnummern in einem Widget. Beispiel: `2, hell, en`.
+`alle` = alle Rufnummern in einem Widget · `standby` = riesige Zahl (StandBy). Beispiel: `2, hell, en`.
 
 **Siri:** In der Kurzbefehle-App einen Kurzbefehl mit der Aktion „Skript ausführen“
 (Scriptable) anlegen, das Skript `AldiTalk` wählen und ihn z. B. „ALDI TALK“ nennen.
